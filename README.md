@@ -1,4 +1,4 @@
-# ContMigration-VT1: Container Migration with CRIU and Kubernetes
+# CubeMig: Container Migration with CRIU and Kubernetes
 
 A comprehensive container migration platform that enables live migration of Kubernetes pods between clusters using CRIU (Checkpoint/Restore in Userspace) technology. The system includes automated threat detection, forensic analysis, and AI-powered security assessments.
 
@@ -16,7 +16,7 @@ A comprehensive container migration platform that enables live migration of Kube
 ## 🏗️ Architecture
 
 ```
-ContMigration-VT1/
+CubeMig/
 ├── apps/
 │   ├── container_migration/
 │   │   ├── frontend/          # Angular web interface
@@ -80,7 +80,7 @@ ContMigration-VT1/
 1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd ContMigration-VT1
+   cd CubeMig
    ```
 
 2. **Setup Backend**
