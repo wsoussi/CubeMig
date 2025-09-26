@@ -18,7 +18,7 @@ if [ -z "$podName" ]; then
     exit 1
 fi
 
-source /home/ubuntu/meierm78/ContMigration-VT1/scripts/migration/.env
+source /home/ubuntu/natwork_demo/CubeMig/scripts/migration/.env
 
 
 kubectl config use-context cluster1 || handle_error "Failed to switch context to cluster1"
@@ -251,7 +251,7 @@ kubectl config use-context $destCluster || handle_error "Failed to switch contex
 log "-- Applying restore yaml file --"
 
 startTime=$(date +%s%3N)
-kubectl apply -f /home/ubuntu/meierm78/ContMigration-VT1/scripts/migration/yaml/restore_$appName.yaml || handle_error "Failed to apply restore yaml file"
+kubectl apply -f /home/ubuntu/natwork_demo/CubeMig/scripts/migration/yaml/restore_$appName.yaml || handle_error "Failed to apply restore yaml file"
 
 newPodName=$appName-restore
 
@@ -281,8 +281,8 @@ log "-- Performance summary created --"
 
 if [ "$forensicAnalysis" == true ]; then
   log "-- Performing forensic analysis --"
-  sudo chmod 770 /home/ubuntu/meierm78/ContMigration-VT1/scripts/utils/forensic_analysis/forensic_analysis.sh
-  /home/ubuntu/meierm78/ContMigration-VT1/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
+  sudo chmod 770 /home/ubuntu/natwork_demo/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh
+  /home/ubuntu/natwork_demo/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
   log "-- Forensic analysis complete --"
 fi
 

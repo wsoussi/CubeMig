@@ -240,13 +240,7 @@ ng serve
 ng build
 ```
 
-### Testing
-```bash
-# Run unit tests (Frontend)
-ng test
-# Run e2e tests (Frontend)
-ng e2e
-```
+
 
 ## 📚 API Documentation
 
@@ -259,6 +253,13 @@ Once the backend is running, visit `http://localhost:8000/docs` for interactive 
 - `GET /k8s/pods/{cluster}` - List pods in cluster
 - `GET /logs/{type}` - Retrieve system logs
 
+## 👥 Contributors
+
+- **Michael Azhari Meier** - Core Development
+- **Rinchen Kolodziejczyk** - Core Development  
+- **Anthony John Mamaril** - Core Development
+- **Wissem Soussi** - Core Development
+
 ## 🤝 Contributing
 
 1. Fork the repository
@@ -269,7 +270,7 @@ Once the backend is running, visit `http://localhost:8000/docs` for interactive 
 
 ## 📝 License
 
-This project is part of a Bachelor's thesis and is available for educational and research purposes.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## 🆘 Troubleshooting
 
@@ -294,10 +295,6 @@ This project is part of a Bachelor's thesis and is available for educational and
 - Frontend logs: Browser developer console
 - Migration logs: `/home/ubuntu/contMigration_logs/`
 - Kubernetes logs: `kubectl logs <pod-name>`
-
-## 📞 Support
-
-For questions, issues, or contributions, please refer to the project documentation or create an issue in the repository.
 
 ---
 
