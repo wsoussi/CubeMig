@@ -9,3 +9,4 @@ class MigrationInfo(BaseModel):
      migration_type: Optional[str]
      forensic_analysis: Optional[bool] = None
      AI_suggestion: Optional[bool] = None
+     timestamp: Optional[str] = None

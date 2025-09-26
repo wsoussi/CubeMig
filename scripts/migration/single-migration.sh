@@ -165,10 +165,10 @@ log "-- Creating checkpoint for $podName on $nodename --"
 migrationStartTime=$(date +%s%3N)
 
 startTime=$(date +%s%3N)
-checkpoint_output= curl -sk -X POST "https://$nodename:10250/checkpoint/default/${podName}/${containerName}" \
+checkpoint_output=$(curl -sk -X POST "https://$nodename:10250/checkpoint/default/${podName}/${containerName}" \
   --key /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.key \
   --cacert /home/ubuntu/.kube/pki/$currentCluster-ca.crt \
-  --cert /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.crt || handle_error "Failed to create checkpoint"
+  --cert /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.crt) || handle_error "Failed to create checkpoint"
 checkpointTime=$(($(date +%s%3N) - $startTime))
 log "checkpoint output: $checkpoint_output"
 log "-- Checkpoint created --"
@@ -228,7 +228,24 @@ log "-- Image pushed onto local registy --"
 
 log "------------------------------------------------------------------"
 
-# Step 9: Apply the updated YAML file
+# Step 9: Switch to destination cluster and prepare
+kubectl config use-context $destCluster || handle_error "Failed to switch context to $destCluster"
+
+log "-- Ensuring original image is available on destination cluster --"
+
+# Get both the image tag and the exact digest that was used in the original pod
+original_image_tag=$(kubectl config use-context cluster1 > /dev/null && kubectl get pod $podName -o jsonpath='{.spec.containers[0].image}') || handle_error "Failed to get original image tag"
+original_image_digest=$(kubectl config use-context cluster1 > /dev/null && kubectl get pod $podName -o jsonpath='{.status.containerStatuses[0].imageID}') || handle_error "Failed to get original image digest"
+
+log "Original image tag: $original_image_tag"
+log "Original image digest: $original_image_digest"
+
+# Use the exact digest to ensure we get the same image that was used for the checkpoint
+log "-- Pre-pulling exact original image by digest on destination cluster --"
+temp_pod_name="image-puller-$(date +%s)"
+kubectl run $temp_pod_name --image="$original_image_digest" --restart=Never --rm=true --command -- sleep 5 > /dev/null 2>&1 || true
+log "-- Original image pull completed --"
+
 kubectl config use-context $destCluster || handle_error "Failed to switch context to $destCluster"
 
 log "-- Applying restore yaml file --"
@@ -280,12 +297,12 @@ log "------------------------------------------------------------------"
 checkpointDir="/home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-*_default-${containerName}-*.tar"
 log "-- Deleting oldest checkpoint if more than 5 are saved --"
 
-if  [ $(ls $checkpointDir | wc -l) -gt 5 ]
+if  [ "$(ls $checkpointDir | wc -l)" -gt 5 ]
       then
   log "-- More than 5 checkpoint files for $podName on $nodename detected. Deleting oldest one... --"
   deleteFile=$(ls -1t $checkpointDir | tail -n 1)
   log "-- Deleting $deleteFile --"
-  rm $(ls -1t $checkpointDir | tail -n 1)
+  rm "$(ls -1t $checkpointDir | tail -n 1)"
 else
   log "-- 5 or less checkpoint files for $podName on $nodename detected --"
 fi

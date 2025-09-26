@@ -1,0 +1,27 @@
+.card {
+  min-height: 240px;
+}
+
+.container-badge {
+  border-radius: var(--border-radius);
+  padding: 0.25em 0.5rem;
+  text-transform: uppercase;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.3px;
+}
+
+.status-Up, .status-running {
+  background: #C8E6C9;
+  color: #256029;
+}
+
+.status-exited {
+  background: #FFCDD2;
+  color: #C63737;
+}
+
+.status-created {
+  background: #FFE0B2;
+  color: #805B36;
+}

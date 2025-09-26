@@ -1,5 +1,6 @@
 import { CUSTOM_ELEMENTS_SCHEMA, NgModule, NO_ERRORS_SCHEMA } from '@angular/core';
 import { BrowserModule } from '@angular/platform-browser';
+import { HttpClientModule } from '@angular/common/http';
 
 import { AppRoutingModule } from './app-routing.module';
 import { AppComponent } from './app.component';
@@ -9,6 +10,7 @@ import { MigrationComponent } from './pages/migration/migration.component';
 import { ConfigComponent } from './pages/config/config.component';
 import { LogsComponent } from './pages/logs/logs.component';
 import { SimulationComponent } from './pages/simulation/simulation.component';
+import { TeeEncapsulationComponent } from './pages/tee-encapsulation/tee-encapsulation.component';
 import { CommonModule } from '@angular/common';
 import { TableModule } from 'primeng/table';
 import { ButtonModule } from 'primeng/button';
@@ -21,8 +23,12 @@ import { ScrollPanelModule } from 'primeng/scrollpanel';
 import { ContextMenuModule } from 'primeng/contextmenu';
 import { DialogModule } from 'primeng/dialog';
 import { ToastModule } from 'primeng/toast';
+import { ProgressSpinnerModule } from 'primeng/progressspinner';
+import { MessagesModule } from 'primeng/messages';
+import { MessageModule } from 'primeng/message';
 import { FormsModule } from '@angular/forms';
 import { MessageService } from 'primeng/api';
+import { MarkdownModule } from 'ngx-markdown';
 
 @NgModule({
   declarations: [
@@ -31,11 +37,13 @@ import { MessageService } from 'primeng/api';
     MigrationComponent,
     ConfigComponent,
     LogsComponent,
-    SimulationComponent
+    SimulationComponent,
+    TeeEncapsulationComponent
   ],
   imports: [
     CommonModule,
     FormsModule,
+    HttpClientModule,
     AppRoutingModule, 
     AppLayoutModule,
     TableModule, 
@@ -48,7 +56,12 @@ import { MessageService } from 'primeng/api';
     ContextMenuModule,
     ScrollPanelModule,
     DialogModule,
-    ToastModule
+    ToastModule,
+    ProgressSpinnerModule,
+    MessagesModule,
+    MessageModule,
+    // Markdown module for rendering markdown content
+    MarkdownModule.forRoot()
   ],
   providers: [MessageService],
   bootstrap: [AppComponent]

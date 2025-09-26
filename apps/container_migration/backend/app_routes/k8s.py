@@ -12,9 +12,11 @@ async def get_pods(cluster: str):
         pods = client.list_namespaced_pod(namespace='default')
         podsList = []
         for pod in pods.items:
+            # Safely handle the case where pod.metadata.labels might be None
+            labels = pod.metadata.labels or {}
             pod_info = dict({
                 "podName": pod.metadata.name, 
-                "appName": pod.metadata.labels.get('app', 'N/A'), 
+                "appName": labels.get('app', 'N/A'), 
                 "status": pod.status.phase,
                 "age": format_age(datetime.now(timezone.utc) - pod.metadata.creation_timestamp)
             })
@@ -27,8 +29,8 @@ async def get_pods(cluster: str):
         
         return {"pods": podsList}
     
-    except client.exceptions.ApiException as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching pods: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching pods: {str(e)}")
 
 @router.delete("/pods/{cluster}/{pod_name}")
 async def delete_pod(cluster: str, pod_name: str):
@@ -42,11 +44,11 @@ async def delete_pod(cluster: str, pod_name: str):
         return {
             "message": f"Pod '{pod_name}' deleted successfully in cluster '{cluster}'"
         }
-    except client.exceptions.ApiException as e:
+    except Exception as e:
         # Handle Kubernetes API exceptions
         raise HTTPException(
-            status_code=e.status,
-            detail=f"Failed to delete pod '{pod_name}' in cluster '{cluster}': {e.reason}",
+            status_code=500,
+            detail=f"Failed to delete pod '{pod_name}' in cluster '{cluster}': {str(e)}",
         )
 
 

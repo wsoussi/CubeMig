@@ -1,2 +1,0 @@
-Index,Image,Checkpointed,Checkpoint size,Freezing time,Frozen time,Memdump time,Memwrite time,Total dump time (ms)
-3761,10.0.0.180:5000/localredis:latest,2024-06-01T07:05:30Z,3.4 MiB,419 µs,79.789 ms,4.492 ms,2.883 ms,87.583

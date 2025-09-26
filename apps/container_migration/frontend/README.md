@@ -1,4 +1,20 @@
-# Frontend
+# Container Migration Application
+
+This project consists of a FastAPI backend and an Angular frontend.
+
+## Quick Start
+
+### Backend (FastAPI)
+1. Navigate to the backend directory: `cd ../backend/`
+2. Install Python dependencies: `pip install -r requirements.txt`
+3. Start the backend server: `python3 main.py`
+4. Backend will be available at `http://localhost:8000`
+
+### Frontend (Angular)
+1. Navigate to the frontend directory (this directory)
+2. Install dependencies: `npm install`
+3. Start the development server: `ng serve`
+4. Frontend will be available at `http://localhost:4200`
 
 This project was generated with [Angular CLI](https://github.com/angular/angular-cli) version 17.3.11.
 

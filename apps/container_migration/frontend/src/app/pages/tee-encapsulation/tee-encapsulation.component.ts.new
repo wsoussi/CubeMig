@@ -1,0 +1,108 @@
+import { Component, OnInit } from '@angular/core';
+import { MessageService, SelectItem } from 'primeng/api';
+import { catchError, map, of } from 'rxjs';
+import { TeeEncapsulationService, PodmanContainer } from '../../service/tee-encapsulation.service';
+
+@Component({
+  selector: 'app-tee-encapsulation',
+  templateUrl: './tee-encapsulation.component.html',
+  styleUrl: './tee-encapsulation.component.scss'
+})
+export class TeeEncapsulationComponent implements OnInit {
+  
+  targetPod: SelectItem[] = [];
+  encapsulationTypes: SelectItem[] = [];
+  selectedApp: string = '';
+  selectedOperation: string = '';
+  loading = false;
+
+  constructor(
+    private teeService: TeeEncapsulationService,
+    private messageService: MessageService
+  ) {}
+
+  ngOnInit(): void {
+    this.encapsulationTypes = [
+      { label: 'Encapsulate (Normal → SEV-SNP)', value: 'encapsulate' },
+      { label: 'Decapsulate (SEV-SNP → Normal)', value: 'decapsulate' }
+    ];
+
+    this.getPodmanContainers();
+  }
+
+  private getPodmanContainers() {
+    this.loading = true;
+    this.teeService.getPodmanContainers().pipe(
+      map(response => {
+        console.log('Podman containers:', response);
+        return response.containers
+          .map(container => ({ 
+            label: `${container.containerName} (${container.environment})`, 
+            value: container.containerName 
+          } as SelectItem));
+      }),
+      catchError(error => {
+        console.error('Error fetching podman containers:', error);
+        this.messageService.add({ 
+          key: 'tst', 
+          severity: 'error', 
+          summary: 'Error', 
+          detail: 'Failed to load podman containers. Check console for details.' 
+        });
+        return of([] as SelectItem[]);
+      })
+    ).subscribe((containers: SelectItem[]) => {
+      this.loading = false;
+      this.targetPod = containers;
+    });
+  }
+
+  encapsulateTEE() {
+    if (!this.selectedApp || !this.selectedOperation) {
+      this.messageService.add({ 
+        key: 'tst', 
+        severity: 'warn', 
+        summary: 'Validation Error', 
+        detail: 'Please select an application and operation type' 
+      });
+      return;
+    }
+
+    this.loading = true;
+    console.log(`Starting TEE operation: ${this.selectedOperation} for ${this.selectedApp}`);
+    
+    this.teeService.performTeeOperation(this.selectedApp, this.selectedOperation)
+      .subscribe({
+        next: (response: any) => {
+          console.log('TEE operation response:', response);
+          this.loading = false;
+          
+          this.messageService.add({ 
+            key: 'tst', 
+            severity: 'success', 
+            summary: 'Operation Successful', 
+            detail: `${this.selectedOperation === 'encapsulate' ? 'Encapsulation' : 'Decapsulation'} completed successfully` 
+          });
+          
+          // Refresh the container list after operation
+          this.getPodmanContainers();
+        },
+        error: (error: any) => {
+          console.error('TEE operation error:', error);
+          this.loading = false;
+          
+          this.messageService.add({ 
+            key: 'tst', 
+            severity: 'error', 
+            summary: 'Operation Failed', 
+            detail: error.message || 'Failed to perform TEE operation. Check console for details.' 
+          });
+        }
+      });
+  }
+
+  reset() {
+    this.selectedApp = '';
+    this.selectedOperation = '';
+  }
+}

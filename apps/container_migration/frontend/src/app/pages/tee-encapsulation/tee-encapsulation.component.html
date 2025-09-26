@@ -1,0 +1,136 @@
+<div class="grid">
+    <!-- Left column: Normal containers table -->
+    <div class="col-12 md:col-6 gap-2">
+        <div class="card">
+            <h5>Normal Environment</h5>
+            <div *ngIf="loading" class="flex justify-content-center">
+                <p-progressSpinner [style]="{width: '50px', height: '50px'}" strokeClass="custom-spinner" strokeWidth="8" fill="var(--surface-ground)" animationDuration=".5s"></p-progressSpinner>
+            </div>
+            <p-table [value]="normalContainers">
+                <ng-template pTemplate="header">
+                    <tr>
+                        <th>Container name</th>
+                        <th>Status</th>
+                        <th>Image</th>
+                    </tr>
+                </ng-template>
+                <ng-template pTemplate="body" let-container>
+                    <tr>
+                        <td style="min-width: 200px;">{{container.containerName}}</td>
+                        <td style="min-width: 150px;">
+                            <span [class]="'container-badge status-' + container.status">{{container.status}}</span>
+                        </td>
+                        <td style="min-width: 200px;">{{container.image}}</td>
+                    </tr>
+                </ng-template>
+            </p-table>
+        </div>
+    </div>
+
+    <!-- Right column: SEV-SNP containers table -->
+    <div class="col-12 md:col-6 gap-2">
+        <div class="card">
+            <h5>TEE Environment</h5>
+            <div *ngIf="loading" class="flex justify-content-center">
+                <p-progressSpinner [style]="{width: '50px', height: '50px'}" strokeClass="custom-spinner" strokeWidth="8" fill="var(--surface-ground)" animationDuration=".5s"></p-progressSpinner>
+            </div>
+            <p-table [value]="sevsnpContainers">
+                <ng-template pTemplate="header">
+                    <tr>
+                        <th>Container name</th>
+                        <th>Status</th>
+                        <th>Image</th>
+                    </tr>
+                </ng-template>
+                <ng-template pTemplate="body" let-container>
+                    <tr>
+                        <td style="min-width: 200px;">{{container.containerName}}</td>
+                        <td style="min-width: 150px;">
+                            <span [class]="'container-badge status-' + container.status">{{container.status}}</span>
+                        </td>
+                        <td style="min-width: 200px;">{{container.image}}</td>
+                    </tr>
+                </ng-template>
+            </p-table>
+        </div>
+    </div>
+
+    <!-- Bottom section: Control panel -->
+    <div class="col-12">
+        <div class="card">
+            <h5>TEE Encapsulation Control</h5>
+            <p>Move containers between normal and SEV-SNP environments</p>
+            
+            <div class="grid">
+                <div class="col-12 md:col-4">
+                    <label for="operation">Application</label>
+                    <p-dropdown [options]="[{label: 'nginx_rproxy (mynginx)', value: 'mynginx'}]"
+                              [(ngModel)]="selectedApp" 
+                              placeholder="Select application"
+                              [style]="{'width': '100%'}"
+                              [disabled]="loading"></p-dropdown>
+                </div>
+                <div class="col-12 md:col-4">
+                    <label for="operation">Operation</label>
+                    <p-dropdown [options]="encapsulationTypes"
+                              [(ngModel)]="selectedOperation"
+                              placeholder="Select operation"
+                              [style]="{'width': '100%'}"
+                              [disabled]="loading || !selectedApp"
+                              [tooltipOptions]="{ showDelay: 150 }"
+                              [pTooltip]="getOperationTooltip()"></p-dropdown>
+                </div>
+                <div class="col-12 md:col-4">
+                    <label>&nbsp;</label>
+                    <div class="flex flex-wrap gap-2">
+                        <button pButton label="Reset" 
+                                (click)="reset()" 
+                                class="p-button-outlined p-button-secondary" 
+                                [disabled]="loading"></button>
+                        <button pButton label="Execute" 
+                                (click)="encapsulateTEE()" 
+                                [loading]="loading" 
+                                [disabled]="loading || !selectedApp || !selectedOperation || !isOperationValid()"></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Log preview section -->
+    <div class="col-12">
+        <div class="card">
+            <h5>Operation Log Preview</h5>
+            <div *ngIf="currentOperationLog">
+                <p-scrollPanel [style]="{width: '100%', height: '300px'}">
+                    <pre style="margin: 0; white-space: pre-wrap;">{{currentOperationLog}}</pre>
+                </p-scrollPanel>
+            </div>
+            <div *ngIf="!currentOperationLog" class="text-center p-3">
+                <p class="text-500">No recent operation logs to display</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Toast messages -->
+<p-toast key="tst"></p-toast>
+<p-toast key="confirm" position="center">
+    <ng-template let-message pTemplate="message">
+        <div class="flex flex-column" style="flex: 1">
+            <div class="text-center">
+                <i class="pi pi-exclamation-triangle" style="font-size: 3rem"></i>
+                <h4>{{message.summary}}</h4>
+                <p>{{message.detail}}</p>
+            </div>
+            <div class="grid p-fluid">
+                <div class="col-6">
+                    <button type="button" pButton (click)="confirmOperation()" label="Yes" class="p-button-success"></button>
+                </div>
+                <div class="col-6">
+                    <button type="button" pButton (click)="cancelOperation()" label="No" class="p-button-secondary"></button>
+                </div>
+            </div>
+        </div>
+    </ng-template>
+</p-toast>

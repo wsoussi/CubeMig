@@ -1,2 +1,0 @@
-Index,Image,Checkpointed,Checkpoint size,Freezing time,Frozen time,Memdump time,Memwrite time,Total dump time (ms)
-464,10.0.0.180:5000/localmongo:latest,2024-06-04T01:43:37Z,96.9 MiB,2.765 ms,220.33 ms,111.94 ms,83.491 ms,418.526

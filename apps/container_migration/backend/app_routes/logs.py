@@ -45,7 +45,7 @@ async def download_file(file_path: str):
         requested_file = (root_path / file_path).resolve()
 
         # Ensure the requested file is within the allowed directory and is a .txt file
-        if not requested_file.is_file() or root_path not in requested_file.parents :
+        if not requested_file.is_file() or root_path not in requested_file.parents:
             raise HTTPException(status_code=404, detail="File not found or access denied")
 
         if requested_file.suffix != ".txt":
@@ -58,15 +58,17 @@ async def download_file(file_path: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An error occurred: {e}")
-        
+
 def get_directory_structure(rootdir):
     """
     Creates a nested dictionary that represents the folder structure of rootdir
     """
     def create_node(name, path, is_file):
+        # Get relative path from rootdir
+        rel_path = os.path.relpath(path, rootdir)
         node = {
             "label": name,
-            "data": path.replace(rootdir, "").lstrip("/"),
+            "data": rel_path,
             "expandedIcon": "pi pi-folder-open" if not is_file else "pi pi-file",
             "collapsedIcon": "pi pi-folder" if not is_file else "pi pi-file",
         }
@@ -75,6 +77,7 @@ def get_directory_structure(rootdir):
         return node
 
     def add_children(node, path):
+        items = []
         for item in os.listdir(path):
             item_path = os.path.join(path, item)
             if item == "temp":
@@ -82,10 +85,12 @@ def get_directory_structure(rootdir):
             if os.path.isdir(item_path):
                 child_node = create_node(item, item_path, False)
                 add_children(child_node, item_path)
-                node["children"].append(child_node)
+                items.append(child_node)
             else:
-                node["children"].append(create_node(item, item_path, True))
+                items.append(create_node(item, item_path, True))
+        # Sort items: directories first, then files, both alphabetically
+        node["children"] = sorted(items, key=lambda x: (x.get("children") is None, x["label"].lower()))
 
     root_node = {"children": []}
     add_children(root_node, rootdir)
-    return root_node["children"]    
+    return root_node["children"]
