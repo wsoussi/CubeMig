@@ -1,4 +1,4 @@
-# CubeMig: Container Migration with CRIU and Kubernetes
+# CubeMig: Container live migration in Kubernetes
 
 A comprehensive container migration platform that enables live migration of Kubernetes pods between clusters using CRIU (Checkpoint/Restore in Userspace) technology. The system includes automated threat detection, forensic analysis, and AI-powered security assessments.
 
