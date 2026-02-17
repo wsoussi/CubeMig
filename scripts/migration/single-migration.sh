@@ -2,13 +2,40 @@
 forensicAnalysis=false
 AISuggestion=false
 
+# Defaults for optional variables
+sourceCluster="cluster1"
+destCluster="cluster2"
+namespace="default"
+
 # Parse command-line options
+log_dir_specified=false
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -fa|--forensic-analysis) forensicAnalysis=true ;;
         -ai|--ai-suggestion) AISuggestion=true ;;
-        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] --"; exit 0 ;;
-        *) podName=$1 ;;
+        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] --"; exit 0 ;;
+        --log-dir) 
+            shift
+            custom_log_dir=$1
+            log_dir_specified=true
+            ;;
+        --source-cluster)
+            shift
+            sourceCluster=$1
+            ;;
+        --dest-cluster)
+            shift
+            destCluster=$1
+            ;;
+        --namespace)
+            shift
+            namespace=$1
+            ;;
+        *) 
+            if [[ -z "$podName" ]]; then
+                podName=$1
+            fi
+            ;;
     esac
     shift
 done
@@ -18,18 +45,10 @@ if [ -z "$podName" ]; then
     exit 1
 fi
 
+# If user did not provide a namespace, keep default above
+# namespace already set to "default" unless overridden by --namespace
+
 source /home/ubuntu/natwork_demo/CubeMig/scripts/migration/.env
-
-
-kubectl config use-context cluster1 || handle_error "Failed to switch context to cluster1"
-appName=$(kubectl get pods $podName -o jsonpath='{.metadata.labels.app}') || handle_error "Failed to get app name"
-
-log_dir="/home/ubuntu/contMigration_logs/$appName/$podName"
-log_file="$log_dir/migration_log.txt"
-
-# Create log directory and file if they do not exist
-mkdir -p "$log_dir" || handle_error "Failed to create log directory"
-touch "$log_file" || handle_error "Failed to create log file"
 
 # Function to log messages
 log() {
@@ -38,9 +57,61 @@ log() {
 
 # Function to handle errors
 handle_error() {
+  local errorMsg="$1"
   log "Error: $1"
+  
+  # If the error is related to pod not running, get more detailed information
+  if [[ "$1" == "Pod is not running" ]]; then
+    log "Collecting detailed diagnostics for pod $newPodName..."
+    
+    # Get pod details
+    log "Pod status:"
+    kubectl get pod $newPodName -o wide >> "$log_file" 2>&1 || log "Failed to get pod status"
+    
+    # Get pod description
+    log "Pod description:"
+    kubectl describe pod $newPodName >> "$log_file" 2>&1 || log "Failed to describe pod"
+    
+    # Get pod logs (with --previous to get terminated container logs)
+    log "Pod logs (if available):"
+    kubectl logs $newPodName --previous --tail=50 >> "$log_file" 2>&1 || log "No previous logs available"
+    kubectl logs $newPodName --tail=50 >> "$log_file" 2>&1 || log "No logs available"
+    
+    # Get events related to this pod
+    log "Pod events:"
+    kubectl get events --field-selector involvedObject.name=$newPodName >> "$log_file" 2>&1 || log "Failed to get pod events"
+    
+    # Check image pull status
+    log "Image pull status:"
+    kubectl describe pod $newPodName | grep -A5 "Events:" >> "$log_file" 2>&1
+    
+    # Check if the pod is trying to pull the image
+    log "Image pull details:"
+    kubectl describe pod $newPodName | grep -A10 "Container $newPodName" >> "$log_file" 2>&1
+    
+    # Get registry image information
+    log "Registry image check:"
+    curl -s http://10.0.0.180:5000/v2/$checkpoint_image_name/tags/list >> "$log_file" 2>&1 || log "Failed to get registry image info"
+  fi
+  
   exit 1
 }
+
+kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster"
+kubectl config set-context --current --namespace="$namespace"
+appName=$(kubectl get pods $podName -o jsonpath='{.metadata.labels.app}') || handle_error "Failed to get app name"
+
+# Set the log directory
+if [[ "$log_dir_specified" == true ]]; then
+    log_dir="$custom_log_dir"
+else
+    log_dir="/home/ubuntu/contMigration_logs/$appName/$podName"
+fi
+log_file="$log_dir/migration_log.txt"
+
+# Create log directory and file if they do not exist
+mkdir -p "$log_dir" || handle_error "Failed to create log directory"
+touch "$log_file" || handle_error "Failed to create log file"
 
 # Function to convert time units to milliseconds
 convert_to_ms() {
@@ -86,6 +157,8 @@ Image Push: $pushImageTime ms
 Pod Ready: $podReadyTime ms
 Total: $migrationTotalTime ms
 -------------------
+--- Cleanup performance ---
+Source pod deletion time: $podDeletionTime ms
 EOF
 }
 
@@ -148,7 +221,6 @@ log "Starting migration for $podName"
 currentCluster=$(kubectl config current-context) || handle_error "Failed to get current context"
 log "Source cluster: $currentCluster"
 
-destCluster="cluster2"
 log "Target cluster: $destCluster"
 
 log "Forensic analysis: $forensicAnalysis"
@@ -165,7 +237,7 @@ log "-- Creating checkpoint for $podName on $nodename --"
 migrationStartTime=$(date +%s%3N)
 
 startTime=$(date +%s%3N)
-checkpoint_output=$(curl -sk -X POST "https://$nodename:10250/checkpoint/default/${podName}/${containerName}" \
+checkpoint_output=$(curl -sk -X POST "https://$nodename:10250/checkpoint/${namespace}/${podName}/${containerName}" \
   --key /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.key \
   --cacert /home/ubuntu/.kube/pki/$currentCluster-ca.crt \
   --cert /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.crt) || handle_error "Failed to create checkpoint"
@@ -179,7 +251,7 @@ log "-- Determining latest checkpoint for ${podName} --"
 
 startTime=$(date +%s%3N)
 # Step 4: Get path to newest checkpoint file with node name incorporated
-checkpointfile=$(ls -1t /home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-${podName}_default-${containerName}-*.tar | head -n 1)
+checkpointfile=$(ls -1t /home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-${podName}_${namespace}-${containerName}-*.tar | head -n 1)
 latestCheckpointTime=$(($(date +%s%3N) - $startTime))
 
 log "-- Latest checkpoint found --"
@@ -207,10 +279,12 @@ log "Checkpoint image name: $checkpoint_image_name"
 log "Checkpoint file: $checkpointfile"
 newcontainer=$(buildah from $checkpoint_image_name) || handle_error "Failed to create new container"
 buildah add $newcontainer $checkpointfile / || handle_error "Failed to add checkpoint file to container"
-buildah config --annotation=io.kubernetes.cri-o.annotations.checkpoint.name=${containerName} $newcontainer || handle_error "Failed to add annotation to container"
+buildah config --annotation=io.kubernetes.cri-o.annotations.checkpoint.name=${containerName} $newcontainer || handle_error "Failed to add checkpoint annotation to container"
+buildah config --annotation=io.container.manager=crio $newcontainer || handle_error "Failed to add crio annotation to container"
 newImageTime=$(($(date +%s%3N) - $startTime))
 
-checkpoint_image_name=$(kubectl get pod $podName -o jsonpath='{.spec.containers[0].image}' | cut -d'/' -f 2 | cut -d':' -f 1) || handle_error "Failed to get image name"
+checkpoint_image_name=$(image=$(kubectl get pod "$podName" -o jsonpath='{.spec.containers[0].image}') && image=${image##*/} && image=${image%%:*} && echo "$image") || handle_error "Failed to get image name"
+
 log "Checkpoint image name: $checkpoint_image_name"
 log "-- Commiting new image --"
 
@@ -228,48 +302,67 @@ log "-- Image pushed onto local registy --"
 
 log "------------------------------------------------------------------"
 
-# Step 9: Switch to destination cluster and prepare
-kubectl config use-context $destCluster || handle_error "Failed to switch context to $destCluster"
-
-log "-- Ensuring original image is available on destination cluster --"
-
-# Get both the image tag and the exact digest that was used in the original pod
-original_image_tag=$(kubectl config use-context cluster1 > /dev/null && kubectl get pod $podName -o jsonpath='{.spec.containers[0].image}') || handle_error "Failed to get original image tag"
-original_image_digest=$(kubectl config use-context cluster1 > /dev/null && kubectl get pod $podName -o jsonpath='{.status.containerStatuses[0].imageID}') || handle_error "Failed to get original image digest"
-
-log "Original image tag: $original_image_tag"
-log "Original image digest: $original_image_digest"
-
-# Use the exact digest to ensure we get the same image that was used for the checkpoint
-log "-- Pre-pulling exact original image by digest on destination cluster --"
-temp_pod_name="image-puller-$(date +%s)"
-kubectl run $temp_pod_name --image="$original_image_digest" --restart=Never --rm=true --command -- sleep 5 > /dev/null 2>&1 || true
-log "-- Original image pull completed --"
-
-kubectl config use-context $destCluster || handle_error "Failed to switch context to $destCluster"
+# Step 9: Apply the updated YAML file
+kubectl config use-context "$destCluster" || handle_error "Failed to switch context to $destCluster"
+kubectl config set-context --current --namespace="$namespace"
 
 log "-- Applying restore yaml file --"
 
 startTime=$(date +%s%3N)
-kubectl apply -f /home/ubuntu/natwork_demo/CubeMig/scripts/migration/yaml/restore_$appName.yaml || handle_error "Failed to apply restore yaml file"
+kubectl apply -f /home/ubuntu/meierm78/CubeMig/scripts/migration/yaml/restore_$containerName.yaml || handle_error "Failed to apply restore yaml file"
 
-newPodName=$appName-restore
+newPodName=$containerName-restore
 
 log "-- Waiting for the new pod \"$newPodName\" to be ready --"
-kubectl wait --for=jsonpath='{.status.phase}'=Running pod/$newPodName || handle_error "Pod is not running"
-podReadyTime=$(($(date +%s%3N) - $startTime))
+# Wait with timeout to allow for image pulling and startup
+if kubectl wait --for=jsonpath='{.status.phase}'=Running pod/$newPodName --timeout=300s; then
+    log "-- $newPodName is running --"
+    podReadyTime=$(($(date +%s%3N) - $startTime))
+    if [[ "$containerName" == "mmt-probe" ]]; then
+      log "-- Detected mmt-probe container, switching mirroring rule --"
+      kubectl config use-context "$currentCluster" || handle_error "Failed to switch context to $currentCluster"
+      kubectl config set-context --current --namespace="$namespace"
+
+      kubectl patch virtualservice "$appName" --type='json' -p='[
+        {
+          "op": "replace",
+          "path": "/spec/http/0/mirror/subset",
+          "value": "v2-monitor"
+        }
+      ]' || handle_error "Failed to redirect mirrored traffic to new app"
+
+
+
+    elif [[ "$namespace" == "istio-enabled" ]]; then
+      log "-- Switching traffic to the new pod --"
+      kubectl config use-context "$currentCluster" || handle_error "Failed to switch context to $currentCluster"
+      kubectl config set-context --current --namespace="$namespace"
+
+      kubectl patch virtualservice "$appName" --type='json' -p='[
+        {
+          "op": "replace",
+          "path": "/spec/http/0/route/0/destination/subset",
+          "value": "v2"
+        }
+      ]' || handle_error "Failed to redirect traffic to new app"
+    fi
+
+else
+    log "-- Warning: $newPodName did not start within 5 minutes, but migration artifacts are in place --"
+    log "-- You may need to check the pod status manually --"
+    podReadyTime=$(($(date +%s%3N) - $startTime))
+fi
 
 migrationTotalTime=$(($(date +%s%3N) - $migrationStartTime))
-
-log "-- $newPodName running --"
 
 log "------------------------------------------------------------------"
 
 log "--- Deleting old pod ---"
-
-kubectl config use-context cluster1 || handle_error "Failed to switch context to cluster1"
+podDeletionStartTime=$(date +%s%3N)
+kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster"
+kubectl config set-context --current --namespace="$namespace"
 kubectl delete pod $podName || handle_error "Failed to delete pod"
-
+podDeletionTime=$(($(date +%s%3N) - $podDeletionStartTime))
 log "-- Old pod \"$podName\" deleted --"
 
 log "------------------------------------------------------------------"
@@ -281,8 +374,8 @@ log "-- Performance summary created --"
 
 if [ "$forensicAnalysis" == true ]; then
   log "-- Performing forensic analysis --"
-  sudo chmod 770 /home/ubuntu/natwork_demo/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh
-  /home/ubuntu/natwork_demo/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
+  sudo chmod 770 /home/ubuntu/meierm78/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh
+  /home/ubuntu/meierm78/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
   log "-- Forensic analysis complete --"
 fi
 
@@ -294,17 +387,29 @@ fi
 
 log "------------------------------------------------------------------"
 
-checkpointDir="/home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-*_default-${containerName}-*.tar"
-log "-- Deleting oldest checkpoint if more than 5 are saved --"
+# Improved cleanup: Clean by application name, not individual pod names
+# Extract base app name (vuln-spring, vuln-redis, atomic-red, etc.)
+baseAppName=$(echo "$containerName" | sed 's/-[0-9].*$//')
+checkpointDir="/home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-*_${namespace}-${baseAppName}-*.tar"
+log "-- Deleting old checkpoints for application ${baseAppName} if more than 5 are saved --"
 
-if  [ "$(ls $checkpointDir | wc -l)" -gt 5 ]
-      then
-  log "-- More than 5 checkpoint files for $podName on $nodename detected. Deleting oldest one... --"
-  deleteFile=$(ls -1t $checkpointDir | tail -n 1)
-  log "-- Deleting $deleteFile --"
-  rm "$(ls -1t $checkpointDir | tail -n 1)"
+checkpointCount=$(ls $checkpointDir 2>/dev/null | wc -l)
+if [ "$checkpointCount" -gt 5 ]; then
+  excessCount=$((checkpointCount - 5))
+  log "-- $checkpointCount checkpoint files for ${baseAppName} on $nodename detected. Deleting oldest $excessCount files... --"
+  
+  # Delete the oldest files to keep only 5 (more efficient approach)
+  filesToDelete=$(ls -1t $checkpointDir | tail -n $excessCount)
+  for fileToDelete in $filesToDelete; do
+    log "-- Deleting $fileToDelete --"
+    rm "$fileToDelete" 2>/dev/null || log "-- Warning: Could not delete $fileToDelete --"
+  done
+  
+  # Verify final count
+  finalCount=$(ls $checkpointDir 2>/dev/null | wc -l)
+  log "-- Cleanup complete. ${baseAppName} now has $finalCount checkpoint files --"
 else
-  log "-- 5 or less checkpoint files for $podName on $nodename detected --"
+  log "-- $checkpointCount checkpoint files for ${baseAppName} on $nodename detected (within limit) --"
 fi
 
 log "------------------------------------------------------------------"

@@ -35,7 +35,7 @@ export class SimulationComponent implements OnInit{
   }
 
   private getPodsCluster1() {
-      this.k8sService.getPods('cluster1').pipe(
+      this.k8sService.getPods('cluster1', 'default').pipe(
         map((podResponse: PodsResponse) => {
             return podResponse.pods
             .filter(pod => pod.status === 'Running' && pod.podName!.startsWith('vuln-spring'))

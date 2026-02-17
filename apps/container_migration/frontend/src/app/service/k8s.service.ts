@@ -19,8 +19,8 @@ export class K8sService {
    * @param cluster The name of the cluster (e.g., 'cluster1' or 'cluster2')
    * @returns Observable containing the pods data as PodsResponse.
    */
-  getPods(cluster: string): Observable<PodsResponse> {
-    const url = `${this.apiUrl}/k8s/pods/${cluster}`;
+  getPods(cluster: string, namespace: string): Observable<PodsResponse> {
+    const url = `${this.apiUrl}/k8s/pods/${cluster}/${namespace}`;
     return this.http.get<PodsResponse>(url);
   }
 
@@ -30,8 +30,8 @@ export class K8sService {
    * @param podName The name of the pod (e.g., 'cpu-restore')
    * @returns Observable containing the pods data as PodsResponse.
    */
-  deletePod(cluster: string, podName: string): Observable<void> {
-    const url = `${this.apiUrl}/k8s/pods/${cluster}/${podName}`;
+  deletePod(cluster: string, namespace: string, podName: string): Observable<void> {
+    const url = `${this.apiUrl}/k8s/pods/${cluster}/${namespace}/${podName}`;
     return this.http.delete<void>(url);
   }
 

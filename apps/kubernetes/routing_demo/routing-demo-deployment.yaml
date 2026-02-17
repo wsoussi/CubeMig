@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: routing-demo
+  namespace: default
+  labels:
+    app: routing-demo
+    version: v1
+    cluster: cluster1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: routing-demo
+  template:
+    metadata:
+      labels:
+        app: routing-demo
+        version: v1
+        cluster: cluster1
+    spec:
+      volumes:
+        - name: podinfo
+          downwardAPI:
+            items:
+              - path: "cluster"
+                fieldRef:
+                  fieldPath: metadata.labels['cluster']
+              - path: "version"
+                fieldRef:
+                  fieldPath: metadata.labels['version']
+      containers:
+        - image: 10.0.0.180:5000/routing_demo:latest
+          name: routing-demo
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: podinfo
+              mountPath: /etc/podinfo
+              readOnly: true
+      restartPolicy: Always

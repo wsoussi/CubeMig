@@ -1,0 +1,37 @@
+---
+# 1. deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mmt-probe
+  namespace: istio-enabled
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: routing-demo
+  template:
+    metadata:
+      labels:
+        app: routing-demo
+        version: v2-monitor
+    spec:
+      containers:
+      - name: mmt-probe
+        image: ghcr.io/montimage/mmt-probe:latest
+        imagePullPolicy: Always
+        args: 
+        - "-ieth0"
+        - "-Xprobe-id=2"
+        - "-Xkafka-output.enable=true"
+        - "-Xkafka-output.hostname=160.85.255.221"
+        - "-Xkafka-output.port=30092"
+        - "-Xkafka-output.topic=mmt-reports"
+        - "-Xsession-report.output-channel=kafka"
+        - "-Xinput.pcap-filter=tcp port 8080"
+        securityContext:
+            privileged: true
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"

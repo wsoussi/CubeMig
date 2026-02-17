@@ -1,8 +1,22 @@
 <div class="grid">
+    <div class="col-12">
+        <div class="card">
+            <h2>Overview of pods</h2>
+            <div class="p-formgrid grid">
+                <div class="field col">
+                    <p-dropdown [options]="clusterListLeft" [(ngModel)]="selectedClusterLeft" placeholder="Cluster to be displayed on the left" [style]="{'width': '100%'}"></p-dropdown>
+                </div>
+                <div class="field col">
+                    <p-dropdown [options]="clusterListRight" [(ngModel)]="selectedClusterRight" placeholder="Cluster to be displayed on the right" [style]="{'width': '100%'}"></p-dropdown>    
+                </div>
+            </div>
+            <p-dropdown [options]="namespaceList" [(ngModel)]="selectedNamespace" placeholder="Namespace" [style]="{'width': '50%'}"></p-dropdown>
+        </div>
+    </div>
     <div class="col-12 md:col-6 gap-2">
         <div class="card">
-            <h5>Cluster 1</h5>
-            <p-table [value]="podsCluster1">
+            <h5>{{selectedClusterLeft}}</h5>
+            <p-table [value]="podsClusterLeft">
                 <ng-template pTemplate="header">
                     <tr>
                         <th>Pod name</th>
@@ -29,12 +43,12 @@
                 </ng-template>
             </p-table>
         </div>
-         
+        
     </div>
     <div class="col-12 md:col-6 gap-2">
         <div class="card">
-            <h5>Cluster 2</h5>
-            <p-table [value]="podsCluster2">
+            <h5>{{selectedClusterRight}}</h5>
+            <p-table [value]="podsClusterRight">
                 <ng-template pTemplate="header">
                     <tr>
                         <th>Pod name</th>
@@ -55,7 +69,7 @@
                             {{pod.age}}
                         </td>
                         <td>
-                            <button pButton type="button" icon="pi pi-trash" class="p-button-rounded p-button-outlined" (click)="deletePod('cluster2', pod.podName)"></button>
+                            <button pButton type="button" icon="pi pi-trash" class="p-button-rounded p-button-outlined" (click)="deletePod('cluster-sev-snp', pod.podName)"></button>
                         </td>
                     </tr>
                 </ng-template>
