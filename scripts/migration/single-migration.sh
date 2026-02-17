@@ -2,17 +2,34 @@
 forensicAnalysis=false
 AISuggestion=false
 
+# Defaults for optional variables
+sourceCluster="cluster1"
+destCluster="cluster2"
+namespace="default"
+
 # Parse command-line options
 log_dir_specified=false
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -fa|--forensic-analysis) forensicAnalysis=true ;;
         -ai|--ai-suggestion) AISuggestion=true ;;
-        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] --"; exit 0 ;;
+        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] --"; exit 0 ;;
         --log-dir) 
             shift
             custom_log_dir=$1
             log_dir_specified=true
+            ;;
+        --source-cluster)
+            shift
+            sourceCluster=$1
+            ;;
+        --dest-cluster)
+            shift
+            destCluster=$1
+            ;;
+        --namespace)
+            shift
+            namespace=$1
             ;;
         *) 
             if [[ -z "$podName" ]]; then
@@ -27,6 +44,9 @@ if [ -z "$podName" ]; then
     echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] --"
     exit 1
 fi
+
+# If user did not provide a namespace, keep default above
+# namespace already set to "default" unless overridden by --namespace
 
 source /home/ubuntu/natwork_demo/CubeMig/scripts/migration/.env
 
@@ -77,7 +97,8 @@ handle_error() {
   exit 1
 }
 
-kubectl config use-context cluster1 || handle_error "Failed to switch context to cluster1"
+kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster"
+kubectl config set-context --current --namespace="$namespace"
 appName=$(kubectl get pods $podName -o jsonpath='{.metadata.labels.app}') || handle_error "Failed to get app name"
 
 # Set the log directory
@@ -136,6 +157,8 @@ Image Push: $pushImageTime ms
 Pod Ready: $podReadyTime ms
 Total: $migrationTotalTime ms
 -------------------
+--- Cleanup performance ---
+Source pod deletion time: $podDeletionTime ms
 EOF
 }
 
@@ -198,7 +221,6 @@ log "Starting migration for $podName"
 currentCluster=$(kubectl config current-context) || handle_error "Failed to get current context"
 log "Source cluster: $currentCluster"
 
-destCluster="cluster2"
 log "Target cluster: $destCluster"
 
 log "Forensic analysis: $forensicAnalysis"
@@ -215,7 +237,7 @@ log "-- Creating checkpoint for $podName on $nodename --"
 migrationStartTime=$(date +%s%3N)
 
 startTime=$(date +%s%3N)
-checkpoint_output=$(curl -sk -X POST "https://$nodename:10250/checkpoint/default/${podName}/${containerName}" \
+checkpoint_output=$(curl -sk -X POST "https://$nodename:10250/checkpoint/${namespace}/${podName}/${containerName}" \
   --key /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.key \
   --cacert /home/ubuntu/.kube/pki/$currentCluster-ca.crt \
   --cert /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.crt) || handle_error "Failed to create checkpoint"
@@ -229,7 +251,7 @@ log "-- Determining latest checkpoint for ${podName} --"
 
 startTime=$(date +%s%3N)
 # Step 4: Get path to newest checkpoint file with node name incorporated
-checkpointfile=$(ls -1t /home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-${podName}_default-${containerName}-*.tar | head -n 1)
+checkpointfile=$(ls -1t /home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-${podName}_${namespace}-${containerName}-*.tar | head -n 1)
 latestCheckpointTime=$(($(date +%s%3N) - $startTime))
 
 log "-- Latest checkpoint found --"
@@ -261,7 +283,8 @@ buildah config --annotation=io.kubernetes.cri-o.annotations.checkpoint.name=${co
 buildah config --annotation=io.container.manager=crio $newcontainer || handle_error "Failed to add crio annotation to container"
 newImageTime=$(($(date +%s%3N) - $startTime))
 
-checkpoint_image_name=$(kubectl get pod $podName -o jsonpath='{.spec.containers[0].image}' | cut -d'/' -f 2 | cut -d':' -f 1) || handle_error "Failed to get image name"
+checkpoint_image_name=$(image=$(kubectl get pod "$podName" -o jsonpath='{.spec.containers[0].image}') && image=${image##*/} && image=${image%%:*} && echo "$image") || handle_error "Failed to get image name"
+
 log "Checkpoint image name: $checkpoint_image_name"
 log "-- Commiting new image --"
 
@@ -280,20 +303,50 @@ log "-- Image pushed onto local registy --"
 log "------------------------------------------------------------------"
 
 # Step 9: Apply the updated YAML file
-kubectl config use-context $destCluster || handle_error "Failed to switch context to $destCluster"
+kubectl config use-context "$destCluster" || handle_error "Failed to switch context to $destCluster"
+kubectl config set-context --current --namespace="$namespace"
 
 log "-- Applying restore yaml file --"
 
 startTime=$(date +%s%3N)
-kubectl apply -f /home/ubuntu/natwork_demo/CubeMig/scripts/migration/yaml/restore_$appName.yaml || handle_error "Failed to apply restore yaml file"
+kubectl apply -f /home/ubuntu/meierm78/CubeMig/scripts/migration/yaml/restore_$containerName.yaml || handle_error "Failed to apply restore yaml file"
 
-newPodName=$appName-restore
+newPodName=$containerName-restore
 
 log "-- Waiting for the new pod \"$newPodName\" to be ready --"
 # Wait with timeout to allow for image pulling and startup
 if kubectl wait --for=jsonpath='{.status.phase}'=Running pod/$newPodName --timeout=300s; then
     log "-- $newPodName is running --"
     podReadyTime=$(($(date +%s%3N) - $startTime))
+    if [[ "$containerName" == "mmt-probe" ]]; then
+      log "-- Detected mmt-probe container, switching mirroring rule --"
+      kubectl config use-context "$currentCluster" || handle_error "Failed to switch context to $currentCluster"
+      kubectl config set-context --current --namespace="$namespace"
+
+      kubectl patch virtualservice "$appName" --type='json' -p='[
+        {
+          "op": "replace",
+          "path": "/spec/http/0/mirror/subset",
+          "value": "v2-monitor"
+        }
+      ]' || handle_error "Failed to redirect mirrored traffic to new app"
+
+
+
+    elif [[ "$namespace" == "istio-enabled" ]]; then
+      log "-- Switching traffic to the new pod --"
+      kubectl config use-context "$currentCluster" || handle_error "Failed to switch context to $currentCluster"
+      kubectl config set-context --current --namespace="$namespace"
+
+      kubectl patch virtualservice "$appName" --type='json' -p='[
+        {
+          "op": "replace",
+          "path": "/spec/http/0/route/0/destination/subset",
+          "value": "v2"
+        }
+      ]' || handle_error "Failed to redirect traffic to new app"
+    fi
+
 else
     log "-- Warning: $newPodName did not start within 5 minutes, but migration artifacts are in place --"
     log "-- You may need to check the pod status manually --"
@@ -305,10 +358,11 @@ migrationTotalTime=$(($(date +%s%3N) - $migrationStartTime))
 log "------------------------------------------------------------------"
 
 log "--- Deleting old pod ---"
-
-kubectl config use-context cluster1 || handle_error "Failed to switch context to cluster1"
+podDeletionStartTime=$(date +%s%3N)
+kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster"
+kubectl config set-context --current --namespace="$namespace"
 kubectl delete pod $podName || handle_error "Failed to delete pod"
-
+podDeletionTime=$(($(date +%s%3N) - $podDeletionStartTime))
 log "-- Old pod \"$podName\" deleted --"
 
 log "------------------------------------------------------------------"
@@ -320,8 +374,8 @@ log "-- Performance summary created --"
 
 if [ "$forensicAnalysis" == true ]; then
   log "-- Performing forensic analysis --"
-  sudo chmod 770 /home/ubuntu/natwork_demo/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh
-  /home/ubuntu/natwork_demo/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
+  sudo chmod 770 /home/ubuntu/meierm78/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh
+  /home/ubuntu/meierm78/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
   log "-- Forensic analysis complete --"
 fi
 
@@ -336,7 +390,7 @@ log "------------------------------------------------------------------"
 # Improved cleanup: Clean by application name, not individual pod names
 # Extract base app name (vuln-spring, vuln-redis, atomic-red, etc.)
 baseAppName=$(echo "$containerName" | sed 's/-[0-9].*$//')
-checkpointDir="/home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-*_default-${baseAppName}-*.tar"
+checkpointDir="/home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-*_${namespace}-${baseAppName}-*.tar"
 log "-- Deleting old checkpoints for application ${baseAppName} if more than 5 are saved --"
 
 checkpointCount=$(ls $checkpointDir 2>/dev/null | wc -l)

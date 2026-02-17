@@ -1,9 +1,10 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, effect, OnInit, signal, WritableSignal } from '@angular/core';
 import { MessageService, SelectItem } from 'primeng/api';
 import { K8sService } from '../../service/k8s.service';
 import { catchError, map, of, take, tap } from 'rxjs';
 import { Pod, PodsResponse } from '../../model/k8s.model';
 import { MigrationRequest } from '../../model/migration-request.model';
+import { ForwardRefHandling } from '@angular/compiler';
 
 @Component({
   selector: 'app-migration',
@@ -15,14 +16,22 @@ export class MigrationComponent implements OnInit{
   sourceCluster: SelectItem[] = [];
   targetCluster: SelectItem[] = [];
   podsCluster1: SelectItem[] = [];
+  namespaceList: SelectItem[] = [];
   selectedSource: string = '';
   selectedTarget: string = '';
   selectedPod: Pod = {} as Pod;
+  selectedNamespace: WritableSignal<string> = signal('');
   isGeneratingFA = false;
   isGeneratingAISuggestion = false;
   loading = false;
 
-  constructor(private k8sService: K8sService, private messageService: MessageService) {}
+  constructor(private k8sService: K8sService, private messageService: MessageService) {
+    effect(() => {
+      const ns = this.selectedNamespace(); 
+      this.selectedPod = {} as Pod;
+      this.getPodsCluster1();
+    });
+  }
   ngOnInit(): void {
     
     this.sourceCluster = [
@@ -30,14 +39,19 @@ export class MigrationComponent implements OnInit{
     ];
 
     this.targetCluster = [
-      { label: 'Cluster 2', value: 'cluster2' }
+      { label: 'Cluster 2', value: 'cluster2' },
+      { label: 'Cluster SEV-SNP', value: 'cluster-sev-snp' }
     ];
 
-    this.getPodsCluster1();
+    this.namespaceList = [
+      { label: 'default', value: 'default' },
+      { label: 'istio-enabled', value: 'istio-enabled' }
+    ]
   }
 
   private getPodsCluster1() {
-    this.k8sService.getPods('cluster1').pipe(
+    this.k8sService.getPods('cluster1', this.selectedNamespace()).pipe(
+      take(1),
       map((podResponse: PodsResponse) => {
         return podResponse.pods
           .filter(pod => pod.status === 'Running')
@@ -52,18 +66,17 @@ export class MigrationComponent implements OnInit{
   }
 
   public reset(): void {
-    console.log(this.selectedPod.appName)
-    console.log(this.selectedPod.podName)
-    console.log(typeof(this.selectedPod))
+    console.log(this.selectedNamespace())
     this.selectedSource = '';
     this.selectedTarget = '';
+    this.selectedNamespace.set('');
     this.selectedPod = {} as Pod;
     this.isGeneratingFA = false;
     this.isGeneratingAISuggestion = false;
   }
 
   public areDropdownsFilled(): boolean {
-    return this.selectedSource !== '' && this.selectedTarget !== '';
+    return this.selectedSource !== '' && this.selectedTarget !== '' && this.selectedNamespace() !== '';
   }
 
   public migratePod(): void {
@@ -71,6 +84,7 @@ export class MigrationComponent implements OnInit{
     const migrationRequest: MigrationRequest = {
       sourceCluster: this.selectedSource,
       targetCluster: this.selectedTarget,
+      namespace: this.selectedNamespace(),
       podName: this.selectedPod.podName!,
       appName: this.selectedPod.appName!,
       forensicAnalysis: this.isGeneratingFA,
@@ -89,7 +103,4 @@ export class MigrationComponent implements OnInit{
       })
     ).subscribe();
   }
-  
-
-
 }

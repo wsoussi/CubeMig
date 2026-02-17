@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: routing-demo
+  namespace: istio-enabled
+  labels: 
+    app: routing-demo
+    version: v1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: routing-demo
+  template:
+    metadata:
+      labels:
+        app: routing-demo
+        version: v1
+    spec:
+      containers:
+        - image: 10.0.0.180:5000/routing_demo:latest
+          name: routing-demo
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          env:
+            - name: CLUSTER_NAME
+              value: cluster1
+            - name: APP_VERSION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['version']
+      restartPolicy: Always

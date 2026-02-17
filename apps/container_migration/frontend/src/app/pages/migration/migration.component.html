@@ -11,6 +11,10 @@
                     <p-dropdown [options]="targetCluster" [(ngModel)]="selectedTarget" placeholder="Select the target cluster" [style]="{'width': '100%'}"></p-dropdown>
                 </div>
             </div>
+            <div class="mb-3">
+                <p-dropdown [options]="namespaceList" [(ngModel)]="selectedNamespace" placeholder="Select the namespace" [style]="{'width': '100%'}"></p-dropdown>
+            </div>
+            
             @if(areDropdownsFilled()) {
                 <p-dropdown [options]="podsCluster1" [(ngModel)]="selectedPod" placeholder="Select the pod to migrate" [showClear]="true" [style]="{'width': '100%'}"></p-dropdown>
             

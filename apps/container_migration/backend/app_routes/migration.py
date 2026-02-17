@@ -68,11 +68,15 @@ async def trigger_migration(info: MigrationInfo):
 
 async def run_migration_script(info: MigrationInfo, log_path: str):
     """Run the migration script asynchronously in the background"""
+    print(info)
     try:
-        # Build dynamic path to migration script - go up to repo root, then to scripts/migration
-        current_dir = Path(__file__).parent.parent.parent.parent.parent  # go up to CubeMig root
-        script_path = current_dir / "scripts" / "migration" / "single-migration.sh"
-        cmd = [str(script_path), info.k8s_pod_name, "--log-dir", log_path]
+        cmd = ["/home/ubuntu/meierm78/CubeMig/scripts/migration/single-migration.sh", info.k8s_pod_name, "--log-dir", log_path]
+        if info.source_cluster:
+            cmd.extend(["--source-cluster", info.source_cluster])
+        if info.target_cluster:
+            cmd.extend(["--dest-cluster", info.target_cluster])
+        if info.namespace:
+            cmd.extend(["--namespace", info.namespace])
         if info.forensic_analysis:
             cmd.append("--forensic-analysis")
         if info.AI_suggestion:
@@ -126,6 +130,7 @@ async def migrate_pod(request: Request):
     body = await request.json()
     source_cluster = body.get("sourceCluster")
     target_cluster = body.get("targetCluster")
+    namespace = body.get("namespace")
     pod_name = body.get("podName")
     app_name = body.get("appName")
     generate_forensic_report = body.get("forensicAnalysis")
@@ -135,6 +140,9 @@ async def migrate_pod(request: Request):
         k8s_pod_name=pod_name,
         container_name=app_name,
         migration_type="manual",
+        source_cluster=source_cluster,
+        target_cluster=target_cluster,
+        namespace=namespace,
         forensic_analysis=generate_forensic_report,
         AI_suggestion=generate_AI_suggestion,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")

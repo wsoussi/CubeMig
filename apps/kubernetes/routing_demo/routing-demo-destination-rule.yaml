@@ -1,0 +1,20 @@
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: routing-demo
+  namespace: istio-enabled
+spec:
+  host: routing-demo.istio-enabled.svc.cluster.local
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v1-monitor
+    labels:
+      version: v1-monitor
+  - name: v2
+    labels:
+      version: v2
+  - name: v2-monitor
+    labels:
+      version: v2-monitor

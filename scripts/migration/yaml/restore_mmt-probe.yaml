@@ -1,16 +1,16 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: vuln-spring-restore
+  name: mmt-probe-restore
   annotations:
     io.kubernetes.cri-o.TrySkipVolumeSELinuxLabel: "true"
   labels:
-    app: vuln-spring
-    version: v2
+    app: routing-demo
+    version: v2-monitor
 spec:
   containers:
-    - name: vuln-spring-restore
-      image: 160.85.255.146:5000/vuln-spring:checkpoint
+    - name: mmt-probe-restore
+      image: 160.85.255.146:5000/mmt-probe:checkpoint
       imagePullPolicy: Always
       securityContext:
         seLinuxOptions:

@@ -7,6 +7,9 @@ class MigrationInfo(BaseModel):
      k8s_pod_name: Optional[str]
      container_name: Optional[str]
      migration_type: Optional[str]
+     source_cluster: Optional[str]
+     target_cluster: Optional[str]
+     namespace: Optional[str]
      forensic_analysis: Optional[bool] = None
      AI_suggestion: Optional[bool] = None
      timestamp: Optional[str] = None

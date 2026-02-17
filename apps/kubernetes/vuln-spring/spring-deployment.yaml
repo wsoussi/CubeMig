@@ -11,6 +11,7 @@ spec:
     metadata:
       labels:
         app: vuln-spring
+        version: v1
     spec:
       containers:
         - image: 10.0.0.180:5000/vuln-spring

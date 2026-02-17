@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: routing-demo-restore
+  annotations:
+    io.kubernetes.cri-o.TrySkipVolumeSELinuxLabel: "true"
+  labels:
+    app: routing-demo
+    version: v2
+spec:
+  containers:
+    - name: routing-demo-restore
+      image: 160.85.255.146:5000/routing_demo:checkpoint
+      imagePullPolicy: Always
+      ports:
+        - containerPort: 8080
+          protocol: TCP
+      env:
+        - name: CLUSTER_NAME
+          value: cluster-sev-snp
+        - name: APP_VERSION
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.labels['version']
+      securityContext:
+        seLinuxOptions:
+          level: s0:c0
