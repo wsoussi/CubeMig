@@ -3,6 +3,7 @@ from datetime import datetime
 import subprocess
 import os
 import asyncio
+from pathlib import Path
 from models.migration_info import MigrationInfo
 from models.alert_model import Alert
 from utils.migration_util import load_config
@@ -68,7 +69,10 @@ async def trigger_migration(info: MigrationInfo):
 async def run_migration_script(info: MigrationInfo, log_path: str):
     """Run the migration script asynchronously in the background"""
     try:
-        cmd = ["/home/ubuntu/meierm78/ContMigration-VT1/scripts/migration/single-migration.sh", info.k8s_pod_name, "--log-dir", log_path]
+        # Build dynamic path to migration script - go up to repo root, then to scripts/migration
+        current_dir = Path(__file__).parent.parent.parent.parent.parent  # go up to CubeMig root
+        script_path = current_dir / "scripts" / "migration" / "single-migration.sh"
+        cmd = [str(script_path), info.k8s_pod_name, "--log-dir", log_path]
         if info.forensic_analysis:
             cmd.append("--forensic-analysis")
         if info.AI_suggestion:

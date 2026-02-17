@@ -28,7 +28,7 @@ if [ -z "$podName" ]; then
     exit 1
 fi
 
-source /home/ubuntu/natwork_demo/CubeMig/scripts/migration/.env
+source /home/ubuntu/meierm78/ContMigration-VT1/scripts/migration/.env
 
 # Function to log messages
 log() {
@@ -285,7 +285,7 @@ kubectl config use-context $destCluster || handle_error "Failed to switch contex
 log "-- Applying restore yaml file --"
 
 startTime=$(date +%s%3N)
-kubectl apply -f /home/ubuntu/natwork_demo/CubeMig/scripts/migration/yaml/restore_$appName.yaml || handle_error "Failed to apply restore yaml file"
+kubectl apply -f /home/ubuntu/meierm78/ContMigration-VT1/scripts/migration/yaml/restore_$appName.yaml || handle_error "Failed to apply restore yaml file"
 
 newPodName=$appName-restore
 
@@ -320,8 +320,8 @@ log "-- Performance summary created --"
 
 if [ "$forensicAnalysis" == true ]; then
   log "-- Performing forensic analysis --"
-  sudo chmod 770 /home/ubuntu/natwork_demo/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh
-  /home/ubuntu/natwork_demo/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
+  sudo chmod 770 /home/ubuntu/meierm78/ContMigration-VT1/scripts/utils/forensic_analysis/forensic_analysis.sh
+  /home/ubuntu/meierm78/ContMigration-VT1/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
   log "-- Forensic analysis complete --"
 fi
 
@@ -333,29 +333,17 @@ fi
 
 log "------------------------------------------------------------------"
 
-# Improved cleanup: Clean by application name, not individual pod names
-# Extract base app name (vuln-spring, vuln-redis, atomic-red, etc.)
-baseAppName=$(echo "$containerName" | sed 's/-[0-9].*$//')
-checkpointDir="/home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-*_default-${baseAppName}-*.tar"
-log "-- Deleting old checkpoints for application ${baseAppName} if more than 5 are saved --"
+checkpointDir="/home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-*_default-${containerName}-*.tar"
+log "-- Deleting oldest checkpoint if more than 5 are saved --"
 
-checkpointCount=$(ls $checkpointDir 2>/dev/null | wc -l)
-if [ "$checkpointCount" -gt 5 ]; then
-  excessCount=$((checkpointCount - 5))
-  log "-- $checkpointCount checkpoint files for ${baseAppName} on $nodename detected. Deleting oldest $excessCount files... --"
-  
-  # Delete the oldest files to keep only 5 (more efficient approach)
-  filesToDelete=$(ls -1t $checkpointDir | tail -n $excessCount)
-  for fileToDelete in $filesToDelete; do
-    log "-- Deleting $fileToDelete --"
-    rm "$fileToDelete" 2>/dev/null || log "-- Warning: Could not delete $fileToDelete --"
-  done
-  
-  # Verify final count
-  finalCount=$(ls $checkpointDir 2>/dev/null | wc -l)
-  log "-- Cleanup complete. ${baseAppName} now has $finalCount checkpoint files --"
+if  [ "$(ls $checkpointDir 2>/dev/null | wc -l)" -gt 5 ]
+      then
+  log "-- More than 5 checkpoint files for $podName on $nodename detected. Deleting oldest one... --"
+  deleteFile=$(ls -1t $checkpointDir | tail -n 1)
+  log "-- Deleting $deleteFile --"
+  rm "$(ls -1t $checkpointDir | tail -n 1)"
 else
-  log "-- $checkpointCount checkpoint files for ${baseAppName} on $nodename detected (within limit) --"
+  log "-- 5 or less checkpoint files for $podName on $nodename detected --"
 fi
 
 log "------------------------------------------------------------------"
