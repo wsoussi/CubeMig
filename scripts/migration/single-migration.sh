@@ -295,7 +295,7 @@ buildah rm $newcontainer || handle_error "Failed to remove new container"
 
 log "-- Pushing image \"$checkpoint_image_name:checkpoint\" to local registry --"
 # Step 6: Push the image to local registry
-buildah push --tls-verify=false localhost/$checkpoint_image_name:checkpoint 10.0.0.180:5000/$checkpoint_image_name:checkpoint || handle_error "Failed to push image to local registry"
+buildah push --tls-verify=false localhost/$checkpoint_image_name:checkpoint 127.0.0.1:5000/$checkpoint_image_name:checkpoint || handle_error "Failed to push image to local registry"
 pushImageTime=$(($(date +%s%3N) - $startTime))
 
 log "-- Image pushed onto local registy --"
@@ -309,9 +309,14 @@ kubectl config set-context --current --namespace="$namespace"
 log "-- Applying restore yaml file --"
 
 startTime=$(date +%s%3N)
-kubectl apply -f /home/ubuntu/meierm78/CubeMig/scripts/migration/yaml/restore_$containerName.yaml || handle_error "Failed to apply restore yaml file"
+timestampSuffix=$(date +"%Y%m%d-%H%M%S")
+newPodName="${containerName}-restore-${timestampSuffix}"
+newPodName="${newPodName:0:63}"
+restoreTemplate="/home/ubuntu/teemig/CubeMig/scripts/migration/yaml/restore_${containerName}.yaml"
+restoreManifest="${log_dir}/restore_${newPodName}.yaml"
 
-newPodName=$containerName-restore
+sed "s/${containerName}-restore/${newPodName}/g" "$restoreTemplate" > "$restoreManifest" || handle_error "Failed to generate restore yaml file"
+kubectl apply -f "$restoreManifest" || handle_error "Failed to apply restore yaml file"
 
 log "-- Waiting for the new pod \"$newPodName\" to be ready --"
 # Wait with timeout to allow for image pulling and startup
@@ -326,7 +331,7 @@ if kubectl wait --for=jsonpath='{.status.phase}'=Running pod/$newPodName --timeo
       kubectl patch virtualservice "$appName" --type='json' -p='[
         {
           "op": "replace",
-          "path": "/spec/http/0/mirror/subset",
+          "path": "/spec/http/0/mirrors/0/destination/subset",
           "value": "v2-monitor"
         }
       ]' || handle_error "Failed to redirect mirrored traffic to new app"
@@ -374,8 +379,8 @@ log "-- Performance summary created --"
 
 if [ "$forensicAnalysis" == true ]; then
   log "-- Performing forensic analysis --"
-  sudo chmod 770 /home/ubuntu/meierm78/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh
-  /home/ubuntu/meierm78/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
+  sudo chmod 770 /home/ubuntu/teemig/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh
+  /home/ubuntu/teemig/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
   log "-- Forensic analysis complete --"
 fi
 
