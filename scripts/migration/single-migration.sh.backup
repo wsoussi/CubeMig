@@ -28,7 +28,7 @@ if [ -z "$podName" ]; then
     exit 1
 fi
 
-source /home/ubuntu/meierm78/ContMigration-VT1/scripts/migration/.env
+source /home/ubuntu/ContMigration-VT1/scripts/migration/.env
 
 # Function to log messages
 log() {
@@ -285,9 +285,14 @@ kubectl config use-context $destCluster || handle_error "Failed to switch contex
 log "-- Applying restore yaml file --"
 
 startTime=$(date +%s%3N)
-kubectl apply -f /home/ubuntu/meierm78/ContMigration-VT1/scripts/migration/yaml/restore_$appName.yaml || handle_error "Failed to apply restore yaml file"
+timestampSuffix=$(date +"%Y%m%d-%H%M%S")
+newPodName="${appName}-restore-${timestampSuffix}"
+newPodName="${newPodName:0:63}"
+restoreTemplate="/home/ubuntu/ContMigration-VT1/scripts/migration/yaml/restore_${appName}.yaml"
+restoreManifest="${log_dir}/restore_${newPodName}.yaml"
 
-newPodName=$appName-restore
+sed "s/${appName}-restore/${newPodName}/g" "$restoreTemplate" > "$restoreManifest" || handle_error "Failed to generate restore yaml file"
+kubectl apply -f "$restoreManifest" || handle_error "Failed to apply restore yaml file"
 
 log "-- Waiting for the new pod \"$newPodName\" to be ready --"
 # Wait with timeout to allow for image pulling and startup
@@ -320,8 +325,8 @@ log "-- Performance summary created --"
 
 if [ "$forensicAnalysis" == true ]; then
   log "-- Performing forensic analysis --"
-  sudo chmod 770 /home/ubuntu/meierm78/ContMigration-VT1/scripts/utils/forensic_analysis/forensic_analysis.sh
-  /home/ubuntu/meierm78/ContMigration-VT1/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
+  sudo chmod 770 /home/ubuntu/ContMigration-VT1/scripts/utils/forensic_analysis/forensic_analysis.sh
+  /home/ubuntu/ContMigration-VT1/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
   log "-- Forensic analysis complete --"
 fi
 
