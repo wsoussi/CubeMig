@@ -37,8 +37,8 @@ export class OverviewComponent implements OnInit, OnDestroy{
     ]
     this.clusterListRight = this.clusterListLeft
     this.selectedClusterLeft = 'cluster1'
-    this.selectedClusterRight = 'cluster-sev-snp'
-    this.selectedNamespace = 'default'
+    this.selectedClusterRight = 'cluster2'
+    this.selectedNamespace = 'istio-enabled'
     this.getPodsLeft()
     this.getPodsRight()
   }
@@ -96,11 +96,6 @@ export class OverviewComponent implements OnInit, OnDestroy{
       take(1), // Ensures only one emission is taken
       tap(() => {
         this.messageService.add({key: 'tst', severity: 'success', summary: 'Success', detail: `Pod ${podName} deleted successfully.` });
-        if(cluster === this.selectedClusterLeft) {
-          this.getPodsLeft();
-        } else if (cluster === this.selectedClusterRight) {
-          this.getPodsRight();
-        }
       }),
       catchError((error: any) => {
         this.messageService.add({key: 'tst', severity: 'error', summary: 'Error', detail: `Failed to delete pod ${podName}`});

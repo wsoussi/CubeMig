@@ -3,6 +3,7 @@ import { Injectable } from '@angular/core';
 import { map, Observable } from 'rxjs';
 import { PodsResponse } from '../model/k8s.model';
 import { MigrationRequest } from '../model/migration-request.model';
+import { MigrationHistoryApiResponse, MigrationStatusResponse } from '../model/migration-status.model';
 import { TreeNode } from 'primeng/api';
 
 @Injectable({
@@ -35,9 +36,19 @@ export class K8sService {
     return this.http.delete<void>(url);
   }
 
-  migratePod(request: MigrationRequest): Observable<void> {
+  migratePod(request: MigrationRequest): Observable<{ message: string; log_path?: string }> {
     const url = `${this.apiUrl}/migrate`;
-    return this.http.post<void>(url, request);
+    return this.http.post<{ message: string; log_path?: string }>(url, request);
+  }
+
+  getMigrationStatus(podName: string): Observable<MigrationStatusResponse> {
+    const url = `${this.apiUrl}/migration-status/${podName}`;
+    return this.http.get<MigrationStatusResponse>(url);
+  }
+
+  getMigrationHistory(limit = 10, offset = 0): Observable<MigrationHistoryApiResponse> {
+    const url = `${this.apiUrl}/migration-history?limit=${limit}&offset=${offset}`;
+    return this.http.get<MigrationHistoryApiResponse>(url);
   }
 
 }

@@ -4,6 +4,7 @@ import subprocess
 import os
 import asyncio
 from pathlib import Path
+import re
 from models.migration_info import MigrationInfo
 from models.alert_model import Alert
 from utils.migration_util import load_config
@@ -15,6 +16,204 @@ triggeredMigrations = []
 base_log_path = "/home/ubuntu/contMigration_logs"
 config = load_config()
 timezone = pytz.timezone('Europe/Berlin')
+
+def _extract_return_code(content: str):
+    for line in content.splitlines():
+        if line.startswith("Return code:"):
+            value = line.split(":", 1)[1].strip()
+            if value.isdigit():
+                return int(value)
+    return None
+
+def _latest_progress_line(log_path: str):
+    migration_log_file = os.path.join(log_path, "migration_log.txt")
+    if not os.path.exists(migration_log_file):
+        return None
+
+    with open(migration_log_file, "r") as file:
+        lines = [line.strip() for line in file.readlines() if line.strip()]
+    if not lines:
+        return None
+    return lines[-1]
+
+def _recent_log_lines(log_path: str, line_count: int = 12):
+    migration_log_file = os.path.join(log_path, "migration_log.txt")
+    if not os.path.exists(migration_log_file):
+        return []
+
+    with open(migration_log_file, "r") as file:
+        lines = [line.rstrip("\n") for line in file.readlines() if line.strip()]
+    if not lines:
+        return []
+    return lines[-line_count:]
+
+def _full_log_lines(log_path: str):
+    lines = []
+    migration_log_file = os.path.join(log_path, "migration_log.txt")
+    result_file = os.path.join(log_path, "migration_result.txt")
+    error_file = os.path.join(log_path, "migration_error.txt")
+
+    if os.path.exists(migration_log_file):
+        with open(migration_log_file, "r") as file:
+            lines.extend([line.rstrip("\n") for line in file.readlines()])
+
+    if os.path.exists(result_file):
+        lines.append("")
+        lines.append("----- migration_result.txt -----")
+        with open(result_file, "r") as file:
+            lines.extend([line.rstrip("\n") for line in file.readlines()])
+
+    if os.path.exists(error_file):
+        lines.append("")
+        lines.append("----- migration_error.txt -----")
+        with open(error_file, "r") as file:
+            lines.extend([line.rstrip("\n") for line in file.readlines()])
+
+    return lines
+
+def _build_stage_statuses(log_lines, final_status: str):
+    stages = [
+        {"key": "checkpoint", "label": "Checkpoint creation", "status": "pending"},
+        {"key": "image", "label": "Image conversion and push", "status": "pending"},
+        {"key": "restore", "label": "Restore pod startup", "status": "pending"},
+        {"key": "traffic", "label": "Traffic switch", "status": "pending"},
+        {"key": "cleanup", "label": "Source cleanup", "status": "pending"},
+    ]
+
+    joined = "\n".join(log_lines)
+
+    if "Creating checkpoint" in joined:
+        stages[0]["status"] = "running"
+    if "-- Checkpoint created --" in joined:
+        stages[0]["status"] = "completed"
+
+    if "Convert checkpoint into image" in joined or "Pushing image" in joined:
+        stages[1]["status"] = "running"
+    if "Image pushed onto local registy" in joined or "Image pushed onto local registry" in joined:
+        stages[1]["status"] = "completed"
+
+    if "Waiting for the new pod" in joined:
+        stages[2]["status"] = "running"
+    if " is running --" in joined:
+        stages[2]["status"] = "completed"
+
+    if "switching mirroring rule" in joined or "Switching traffic to the new pod" in joined:
+        stages[3]["status"] = "running"
+    if "--- Deleting old pod ---" in joined or "-- Migration complete --" in joined:
+        stages[3]["status"] = "completed"
+
+    if "--- Deleting old pod ---" in joined:
+        stages[4]["status"] = "running"
+    if "Old pod" in joined and "deleted" in joined:
+        stages[4]["status"] = "completed"
+
+    if final_status == "error":
+        for stage in reversed(stages):
+            if stage["status"] == "running":
+                stage["status"] = "failed"
+                break
+        else:
+            for stage in reversed(stages):
+                if stage["status"] == "completed":
+                    stage["status"] = "failed"
+                    break
+
+    return stages
+
+def _extract_log_metadata(log_path: str):
+    metadata = {
+        "source_cluster": "unknown",
+        "target_cluster": "unknown",
+        "namespace": "unknown",
+        "target_pod_name": "unknown"
+    }
+    migration_log_file = os.path.join(log_path, "migration_log.txt")
+    if not os.path.exists(migration_log_file):
+        return metadata
+
+    with open(migration_log_file, "r") as file:
+        content = file.read()
+
+    source_match = re.search(r"^Source cluster:\s*(.+)$", content, re.MULTILINE)
+    target_match = re.search(r"^Target cluster:\s*(.+)$", content, re.MULTILINE)
+    namespace_match = re.search(r"^Namespace:\s*(.+)$", content, re.MULTILINE)
+    target_pod_match = re.search(r'Waiting for the new pod "([^"]+)" to be ready', content)
+
+    if source_match:
+        metadata["source_cluster"] = source_match.group(1).strip()
+    if target_match:
+        metadata["target_cluster"] = target_match.group(1).strip()
+    if namespace_match:
+        metadata["namespace"] = namespace_match.group(1).strip()
+    if target_pod_match:
+        metadata["target_pod_name"] = target_pod_match.group(1).strip()
+
+    return metadata
+
+def _collect_recent_migrations(limit: int, offset: int):
+    entries = []
+    for container_dir in os.listdir(base_log_path):
+        container_path = os.path.join(base_log_path, container_dir)
+        if not os.path.isdir(container_path):
+            continue
+
+        for log_dir in os.listdir(container_path):
+            log_path = os.path.join(container_path, log_dir)
+            if not os.path.isdir(log_path):
+                continue
+
+            created_ts = os.path.getctime(log_path)
+            result_file = os.path.join(log_path, "migration_result.txt")
+            error_file = os.path.join(log_path, "migration_error.txt")
+            full_log_lines = _full_log_lines(log_path)
+            status = "running"
+            summary = _latest_progress_line(log_path) or "Migration is still in progress"
+            return_code = None
+
+            if os.path.exists(result_file):
+                with open(result_file, "r") as file:
+                    content = file.read()
+                return_code = _extract_return_code(content)
+                if return_code == 0:
+                    status = "completed"
+                    summary = "Migration completed successfully"
+                else:
+                    status = "error"
+                    summary = f"Migration failed with return code {return_code}" if return_code is not None else "Migration failed"
+            elif os.path.exists(error_file):
+                status = "error"
+                with open(error_file, "r") as file:
+                    first_line = file.readline().strip()
+                summary = first_line or "Migration failed"
+
+            if "_" in log_dir:
+                _, pod_name = log_dir.split("_", 1)
+            else:
+                pod_name = log_dir
+            metadata = _extract_log_metadata(log_path)
+            stage_statuses = _build_stage_statuses(full_log_lines, status)
+
+            entries.append({
+                "pod_name": pod_name,
+                "app_name": container_dir,
+                "source_cluster": metadata["source_cluster"],
+                "target_cluster": metadata["target_cluster"],
+                "namespace": metadata["namespace"],
+                "target_pod_name": metadata["target_pod_name"],
+                "status": status,
+                "summary": summary,
+                "log_path": log_path,
+                "log_lines": full_log_lines,
+                "return_code": return_code,
+                "stage_statuses": stage_statuses,
+                "created_at": datetime.fromtimestamp(created_ts, tz=timezone).isoformat()
+            })
+
+    entries.sort(key=lambda item: item["created_at"], reverse=True)
+    total = len(entries)
+    paged_items = entries[offset:offset + limit]
+    has_more = (offset + limit) < total
+    return paged_items, total, has_more
 
 @router.post("/alert")
 async def handle_alerts(alert: Alert):
@@ -70,7 +269,7 @@ async def run_migration_script(info: MigrationInfo, log_path: str):
     """Run the migration script asynchronously in the background"""
     print(info)
     try:
-        cmd = ["/home/ubuntu/meierm78/CubeMig/scripts/migration/single-migration.sh", info.k8s_pod_name, "--log-dir", log_path]
+        cmd = ["/home/ubuntu/teemig/CubeMig/scripts/migration/single-migration.sh", info.k8s_pod_name, "--log-dir", log_path]
         if info.source_cluster:
             cmd.extend(["--source-cluster", info.source_cluster])
         if info.target_cluster:
@@ -168,6 +367,8 @@ async def get_migration_status(pod_name: str):
         
         # Get the most recent log directory
         latest_log_path = max(pod_logs, key=lambda x: x[1])[0]
+        metadata = _extract_log_metadata(latest_log_path)
+        full_log_lines = _full_log_lines(latest_log_path)
         
         # Check for completion indicators
         result_file = os.path.join(latest_log_path, "migration_result.txt")
@@ -176,16 +377,78 @@ async def get_migration_status(pod_name: str):
         if os.path.exists(result_file):
             with open(result_file, 'r') as f:
                 content = f.read()
-            return {"status": "completed", "log_path": latest_log_path, "result": content}
+            return_code = _extract_return_code(content)
+            if return_code == 0:
+                stage_statuses = _build_stage_statuses(full_log_lines, "completed")
+                return {
+                    "status": "completed",
+                    "log_path": latest_log_path,
+                    "result": content,
+                    "return_code": return_code,
+                    "recent_log_lines": _recent_log_lines(latest_log_path),
+                    "log_lines": full_log_lines,
+                    "stage_statuses": stage_statuses,
+                    **metadata
+                }
+            stage_statuses = _build_stage_statuses(full_log_lines, "error")
+            return {
+                "status": "error",
+                "log_path": latest_log_path,
+                "error": content,
+                "return_code": return_code,
+                "recent_log_lines": _recent_log_lines(latest_log_path),
+                "log_lines": full_log_lines,
+                "stage_statuses": stage_statuses,
+                **metadata
+            }
         elif os.path.exists(error_file):
             with open(error_file, 'r') as f:
                 content = f.read()
-            return {"status": "error", "log_path": latest_log_path, "error": content}
+            stage_statuses = _build_stage_statuses(full_log_lines, "error")
+            return {
+                "status": "error",
+                "log_path": latest_log_path,
+                "error": content,
+                "recent_log_lines": _recent_log_lines(latest_log_path),
+                "log_lines": full_log_lines,
+                "stage_statuses": stage_statuses,
+                **metadata
+            }
         else:
-            return {"status": "running", "log_path": latest_log_path, "message": "Migration is still in progress"}
+            progress = _latest_progress_line(latest_log_path)
+            stage_statuses = _build_stage_statuses(full_log_lines, "running")
+            return {
+                "status": "running",
+                "log_path": latest_log_path,
+                "message": progress or "Migration is still in progress",
+                "recent_log_lines": _recent_log_lines(latest_log_path),
+                "log_lines": full_log_lines,
+                "stage_statuses": stage_statuses,
+                **metadata
+            }
             
     except Exception as e:
         return {"status": "error", "message": f"Error checking migration status: {str(e)}"}
+
+@router.get("/migration-history")
+async def get_migration_history(limit: int = 10, offset: int = 0):
+    try:
+        if limit < 1:
+            limit = 1
+        if limit > 50:
+            limit = 50
+        if offset < 0:
+            offset = 0
+        items, total, has_more = _collect_recent_migrations(limit, offset)
+        return {
+            "items": items,
+            "limit": limit,
+            "offset": offset,
+            "total": total,
+            "has_more": has_more
+        }
+    except Exception as e:
+        return {"items": [], "limit": limit, "offset": offset, "total": 0, "has_more": False, "error": f"Error reading migration history: {str(e)}"}
 
 def reload_config():
     global config

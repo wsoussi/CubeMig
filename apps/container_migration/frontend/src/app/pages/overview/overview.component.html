@@ -37,7 +37,7 @@
                             {{pod.age}}
                         </td>
                         <td>
-                            <button pButton type="button" icon="pi pi-trash" class="p-button-rounded p-button-outlined" (click)="deletePod('cluster1', pod.podName)"></button>
+                            <button pButton type="button" icon="pi pi-trash" class="p-button-rounded p-button-outlined" (click)="deletePod(selectedClusterLeft, pod.podName)"></button>
                         </td>
                     </tr>
                 </ng-template>
@@ -69,7 +69,7 @@
                             {{pod.age}}
                         </td>
                         <td>
-                            <button pButton type="button" icon="pi pi-trash" class="p-button-rounded p-button-outlined" (click)="deletePod('cluster-sev-snp', pod.podName)"></button>
+                            <button pButton type="button" icon="pi pi-trash" class="p-button-rounded p-button-outlined" (click)="deletePod(selectedClusterRight, pod.podName)"></button>
                         </td>
                     </tr>
                 </ng-template>
