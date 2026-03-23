@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: setup-insecure-registry
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: setup-insecure-registry
+  template:
+    metadata:
+      labels:
+        app: setup-insecure-registry
+    spec:
+      hostPID: true
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: setup
+          image: alpine:3.20
+          securityContext:
+            privileged: true
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              REGISTRY="${REGISTRY:-160.85.255.146:5000}"
+              CONF_DIR="/host/etc/containers/registries.conf.d"
+              CONF_FILE="${CONF_DIR}/99-cubemig-insecure.conf"
+              TMP_FILE="/tmp/99-cubemig-insecure.conf"
+
+              mkdir -p "${CONF_DIR}"
+              cat > "${TMP_FILE}" <<EOF
+              [[registry]]
+              location = "${REGISTRY}"
+              insecure = true
+              EOF
+
+              # Restart CRI-O only when config changed.
+              if [ ! -f "${CONF_FILE}" ] || ! cmp -s "${TMP_FILE}" "${CONF_FILE}"; then
+                cp "${TMP_FILE}" "${CONF_FILE}"
+                nsenter -t 1 -m -u -i -n -p -- systemctl restart crio || true
+              fi
+
+              # Keep the pod running temporarily for log inspection.
+              sleep 3600
+          env:
+            - name: REGISTRY
+              value: "160.85.255.146:5000"
+          volumeMounts:
+            - name: host-etc
+              mountPath: /host/etc
+      volumes:
+        - name: host-etc
+          hostPath:
+            path: /etc

@@ -6,4 +6,5 @@ export interface MigrationRequest {
     appName: string;
     forensicAnalysis: boolean;
     AISuggestion: boolean;
+    disableIstioSidecar: boolean;
 }

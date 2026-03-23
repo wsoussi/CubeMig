@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: setup-criu-tcp-close
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: setup-criu-tcp-close
+  template:
+    metadata:
+      labels:
+        app: setup-criu-tcp-close
+    spec:
+      hostPID: true
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: setup
+          image: alpine:3.20
+          securityContext:
+            privileged: true
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              CRIU_DIR="/host/etc/criu"
+              CONF_FILE="${CRIU_DIR}/runc.conf"
+              TMP_FILE="/tmp/runc.conf"
+
+              mkdir -p "${CRIU_DIR}"
+              touch "${CONF_FILE}"
+
+              cp "${CONF_FILE}" "${TMP_FILE}"
+
+              # CRIU restore for TCP sockets needs tcp-close when sockets are not fully restorable.
+              if ! grep -Eq '^[[:space:]]*tcp-close[[:space:]]*$' "${TMP_FILE}"; then
+                printf '\n# Added by CubeMig for CRIU restore compatibility\n' >> "${TMP_FILE}"
+                printf 'tcp-close\n' >> "${TMP_FILE}"
+              fi
+
+              if ! cmp -s "${TMP_FILE}" "${CONF_FILE}"; then
+                cp "${TMP_FILE}" "${CONF_FILE}"
+                echo "Updated ${CONF_FILE} with tcp-close option"
+              else
+                echo "No changes needed in ${CONF_FILE}"
+              fi
+
+              # Keep pod alive shortly for inspection/log collection.
+              sleep 3600
+          volumeMounts:
+            - name: host-etc
+              mountPath: /host/etc
+      volumes:
+        - name: host-etc
+          hostPath:
+            path: /etc

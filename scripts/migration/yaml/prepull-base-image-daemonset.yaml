@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: __DS_NAME__
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: __DS_NAME__
+  template:
+    metadata:
+      labels:
+        app: __DS_NAME__
+    spec:
+      containers:
+        - name: prepull
+          image: __IMAGE_REF__
+          imagePullPolicy: Always

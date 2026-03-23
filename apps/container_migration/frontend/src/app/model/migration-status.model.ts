@@ -18,6 +18,8 @@ export interface MigrationStatusResponse {
   target_cluster?: string;
   namespace?: string;
   target_pod_name?: string;
+  target_node?: string;
+  recent_k8s_events?: string[];
   recent_log_lines?: string[];
   log_lines?: string[];
   stage_statuses?: MigrationStage[];

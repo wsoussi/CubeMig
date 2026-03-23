@@ -53,7 +53,7 @@
                     <p-dropdown [options]="actionSelection" [(ngModel)]="selectedAction" placeholder="Select action" [style]="{'width': '100%'}"></p-dropdown>
                 </div>
                 <div class="field">
-                    <p-dropdown [options]="clusterSelection" [(ngModel)]="selectedCluster" placeholder="Select a cluster" [style]="{'width': '100%'}"></p-dropdown>
+                    <p-dropdown [options]="clusterSelection" [(ngModel)]="selectedCluster" (onChange)="onSourceClusterChange()" placeholder="Select a cluster" [style]="{'width': '100%'}"></p-dropdown>
                 </div>
 
                 @if(isMigrateActionSelected()) {

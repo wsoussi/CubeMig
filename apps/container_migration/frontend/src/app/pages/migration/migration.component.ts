@@ -23,12 +23,15 @@ export class MigrationComponent implements OnInit, OnDestroy{
   selectedNamespace: WritableSignal<string> = signal('');
   isGeneratingFA = false;
   isGeneratingAISuggestion = false;
+  disableIstioSidecar = false;
   loading = false;
   activeMigrationStatus: MigrationRuntimeStatus = 'not_started';
   statusDetail = '';
   statusLogPath = '';
+  statusTargetNode = '';
   statusUpdatedAt?: Date;
   liveLogLines: string[] = [];
+  statusK8sEvents: string[] = [];
   stageStatuses: MigrationStage[] = [];
   migrationHistory: MigrationHistoryItem[] = [];
   selectedRecentLogPath: string | null = null;
@@ -43,20 +46,11 @@ export class MigrationComponent implements OnInit, OnDestroy{
     effect(() => {
       const ns = this.selectedNamespace(); 
       this.selectedPod = {} as Pod;
-      this.getPodsCluster1();
+      this.getPodsForSource();
     });
   }
   ngOnInit(): void {
-    
-    this.sourceCluster = [
-      { label: 'Cluster 1', value: 'cluster1' }
-    ];
-
-    this.targetCluster = [
-      { label: 'Cluster 2', value: 'cluster2' },
-      { label: 'Cluster SEV-SNP', value: 'cluster-sev-snp' }
-    ];
-
+    this.loadClusters();
     this.namespaceList = [
       { label: 'default', value: 'default' },
       { label: 'istio-enabled', value: 'istio-enabled' }
@@ -72,8 +66,44 @@ export class MigrationComponent implements OnInit, OnDestroy{
     this.destroy$.complete();
   }
 
-  private getPodsCluster1() {
-    this.k8sService.getPods('cluster1', this.selectedNamespace()).pipe(
+  private loadClusters(): void {
+    this.k8sService.getClusters().pipe(
+      take(1),
+      catchError(() => of({ clusters: [] as string[] }))
+    ).subscribe((response) => {
+      const options = (response.clusters || []).map((cluster) => ({
+        label: cluster,
+        value: cluster
+      } as SelectItem));
+      this.sourceCluster = options;
+      this.targetCluster = options;
+
+      if (!this.selectedSource && options.length > 0) {
+        this.selectedSource = String(options[0].value);
+      }
+      if (!this.selectedTarget) {
+        const fallbackTarget = options.find((opt) => opt.value !== this.selectedSource);
+        this.selectedTarget = fallbackTarget ? String(fallbackTarget.value) : '';
+      }
+      this.getPodsForSource();
+    });
+  }
+
+  public onSourceClusterChange(): void {
+    this.selectedPod = {} as Pod;
+    if (this.selectedSource === this.selectedTarget) {
+      this.selectedTarget = '';
+    }
+    this.getPodsForSource();
+  }
+
+  private getPodsForSource() {
+    if (!this.selectedSource || !this.selectedNamespace()) {
+      this.podsCluster1 = [];
+      return;
+    }
+
+    this.k8sService.getPods(this.selectedSource, this.selectedNamespace()).pipe(
       take(1),
       map((podResponse: PodsResponse) => {
         return podResponse.pods
@@ -96,6 +126,7 @@ export class MigrationComponent implements OnInit, OnDestroy{
     this.selectedPod = {} as Pod;
     this.isGeneratingFA = false;
     this.isGeneratingAISuggestion = false;
+    this.disableIstioSidecar = false;
   }
 
   public areDropdownsFilled(): boolean {
@@ -107,6 +138,10 @@ export class MigrationComponent implements OnInit, OnDestroy{
       this.messageService.add({ key: 'tst', severity: 'warn', summary: 'Warning', detail: 'Please select a pod to migrate' });
       return;
     }
+    if (this.selectedSource === this.selectedTarget) {
+      this.messageService.add({ key: 'tst', severity: 'warn', summary: 'Warning', detail: 'Source and target cluster must be different' });
+      return;
+    }
 
     this.loading = true;
     const migrationRequest: MigrationRequest = {
@@ -116,7 +151,8 @@ export class MigrationComponent implements OnInit, OnDestroy{
       podName: this.selectedPod.podName!,
       appName: this.selectedPod.appName!,
       forensicAnalysis: this.isGeneratingFA,
-      AISuggestion: this.isGeneratingAISuggestion
+      AISuggestion: this.isGeneratingAISuggestion,
+      disableIstioSidecar: this.disableIstioSidecar
     };
     this.k8sService.migratePod(migrationRequest).pipe(
       take(1), // Ensures only one emission is taken
@@ -126,7 +162,9 @@ export class MigrationComponent implements OnInit, OnDestroy{
         this.statusDetail = response.message || 'Migration started';
         this.statusUpdatedAt = new Date();
         this.liveLogLines = ['Migration task has been started'];
-        this.stageStatuses = this.defaultStages('checkpoint', 'running');
+        this.statusK8sEvents = [];
+        this.statusTargetNode = '';
+        this.stageStatuses = this.defaultStages('pipeline_check', 'running');
         this.startPollingStatus(migrationRequest.podName);
         this.messageService.add({ key: 'tst', severity: 'info', summary: 'Started', detail: 'Migration started. Monitoring progress...' });
         this.pushOrUpdateHistory({
@@ -136,7 +174,7 @@ export class MigrationComponent implements OnInit, OnDestroy{
           namespace: migrationRequest.namespace,
           targetPodName: 'pending',
           logLines: ['Migration task has been started'],
-          stageStatuses: this.defaultStages('checkpoint', 'running'),
+          stageStatuses: this.defaultStages('pipeline_check', 'running'),
           startedAt: new Date(),
           status: 'started',
           logPath: response.log_path,
@@ -188,8 +226,10 @@ export class MigrationComponent implements OnInit, OnDestroy{
     this.activeMigrationStatus = mappedStatus;
     this.statusUpdatedAt = new Date();
     this.statusLogPath = statusResponse.log_path || this.statusLogPath;
+    this.statusTargetNode = statusResponse.target_node || this.statusTargetNode;
     this.statusDetail = this.buildStatusMessage(statusResponse);
     this.liveLogLines = statusResponse.log_lines || statusResponse.recent_log_lines || this.liveLogLines;
+    this.statusK8sEvents = statusResponse.recent_k8s_events || this.statusK8sEvents;
     this.stageStatuses = statusResponse.stage_statuses || this.stageStatuses;
 
     const activeItem = this.migrationHistory[0];
@@ -235,13 +275,23 @@ export class MigrationComponent implements OnInit, OnDestroy{
   }
 
   private buildStatusMessage(statusResponse: MigrationStatusResponse): string {
+    const eventText = (statusResponse.recent_k8s_events || []).join('\n');
     if (statusResponse.status === 'error') {
-      const source = statusResponse.error || statusResponse.message || 'Migration failed';
+      const source = `${statusResponse.error || statusResponse.message || 'Migration failed'}\n${eventText}`;
       if (source.includes('Failed to redirect mirrored traffic')) {
         return 'Traffic switch failed. Check VirtualService mirror path and destination subset.';
       }
       if (source.includes('ImagePullBackOff') || source.includes('ErrImagePull')) {
         return 'Image pull failed on target cluster. Check registry availability and pull secrets.';
+      }
+      if (source.includes('http: server gave HTTP response to HTTPS client')) {
+        return 'Registry TLS mismatch. Configure destination node runtime for insecure HTTP registry or use TLS registry.';
+      }
+      if (source.includes('image not known')) {
+        return 'Restore failed because required base image is not known on the destination node. Ensure base image pre-pull succeeded.';
+      }
+      if (source.includes('CreateContainerError') || source.includes('RunContainerError') || source.includes('failed to restore container')) {
+        return 'Container restore failed on destination node (CRIU runtime issue). Check node CRI-O logs and restore.log.';
       }
       if (source.includes('Failed to switch context')) {
         return 'Kubernetes context switch failed. Verify kubeconfig and context names.';
@@ -261,8 +311,10 @@ export class MigrationComponent implements OnInit, OnDestroy{
 
   private defaultStages(runningKey?: string, runningState: 'running' | 'pending' = 'pending'): MigrationStage[] {
     return [
+      { key: 'pipeline_check', label: 'Pipeline checks', status: runningKey === 'pipeline_check' ? runningState : 'pending' },
       { key: 'checkpoint', label: 'Checkpoint creation', status: runningKey === 'checkpoint' ? runningState : 'pending' },
       { key: 'image', label: 'Image conversion and push', status: runningKey === 'image' ? runningState : 'pending' },
+      { key: 'prepull', label: 'Base image pre-pull', status: runningKey === 'prepull' ? runningState : 'pending' },
       { key: 'restore', label: 'Restore pod startup', status: runningKey === 'restore' ? runningState : 'pending' },
       { key: 'traffic', label: 'Traffic switch', status: runningKey === 'traffic' ? runningState : 'pending' },
       { key: 'cleanup', label: 'Source cleanup', status: runningKey === 'cleanup' ? runningState : 'pending' }
@@ -319,8 +371,10 @@ export class MigrationComponent implements OnInit, OnDestroy{
           this.activeMigrationStatus = latest.status;
           this.statusDetail = latest.summary || '';
           this.statusLogPath = latest.logPath || '';
+          this.statusTargetNode = '';
           this.statusUpdatedAt = latest.startedAt;
           this.liveLogLines = latest.logLines || [];
+          this.statusK8sEvents = [];
           this.stageStatuses = latest.stageStatuses || this.defaultStages();
           if (latest.status === 'running') {
             this.startPollingStatus(latest.podName);

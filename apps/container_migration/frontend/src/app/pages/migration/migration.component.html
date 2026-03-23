@@ -5,7 +5,7 @@
             <p>Choose the source and target cluster, the pod to migrate and the options for the migration</p>
             <div class="p-formgrid grid">
                 <div class="field col">
-                    <p-dropdown [options]="sourceCluster" [(ngModel)]="selectedSource" placeholder="Select the source cluster" [style]="{'width': '100%'}"></p-dropdown>
+                    <p-dropdown [options]="sourceCluster" [(ngModel)]="selectedSource" (onChange)="onSourceClusterChange()" placeholder="Select the source cluster" [style]="{'width': '100%'}"></p-dropdown>
                 </div>
                 <div class="field col">
                     <p-dropdown [options]="targetCluster" [(ngModel)]="selectedTarget" placeholder="Select the target cluster" [style]="{'width': '100%'}"></p-dropdown>
@@ -25,7 +25,11 @@
                 <div class="grid formgrid mb-3 mt-5">
                     <p-inputSwitch [(ngModel)]="isGeneratingAISuggestion" class="mr-5 ml-3" [disabled]="!isGeneratingFA"></p-inputSwitch>
                     <p>Generate AI suggestion</p>
-                </div>    
+                </div>
+                <div class="grid formgrid mb-3 mt-5">
+                    <p-inputSwitch [(ngModel)]="disableIstioSidecar" class="mr-5 ml-3"></p-inputSwitch>
+                    <p>Disable Istio sidecar</p>
+                </div>
                 <div class="flex flex-wrap gap-2" style="display: flex; justify-content: flex-end;">
                     <button pButton label="Reset" (click)="reset()" class="p-button-outlined p-button-secondary"></button>
                     <button pButton label="Migrate" (click)="migratePod()" [loading]="loading"></button>
@@ -102,6 +106,9 @@
             @if(statusUpdatedAt) {
                 <small class="text-color-secondary">Last update: {{ statusUpdatedAt | date:'mediumTime' }}</small>
             }
+            @if(statusTargetNode) {
+                <div><small class="text-color-secondary">Target node: {{ statusTargetNode }}</small></div>
+            }
 
             <div class="step-list">
                 @for(stage of stageStatuses; track stage.key; let i = $index) {
@@ -122,6 +129,14 @@
                     <pre>{{ liveLogLines.join('\n') }}</pre>
                 } @else {
                     <pre>No migration logs yet.</pre>
+                }
+            </div>
+            <div class="log-output mt-3">
+                <div class="log-title">Latest Kubernetes events (target pod)</div>
+                @if(statusK8sEvents.length > 0) {
+                    <pre>{{ statusK8sEvents.join('\n') }}</pre>
+                } @else {
+                    <pre>No Kubernetes events captured yet.</pre>
                 }
             </div>
         </div>

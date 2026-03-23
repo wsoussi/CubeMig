@@ -138,7 +138,7 @@ def perform_tee_operation(teeInfo: TeeOperationInfo):
     print(f"Received TEE operation request: {teeInfo.operation} for container {teeInfo.containerName}")
     
     # Path to the tee-migration.sh script
-    script_path = "/home/ubuntu/meierm78/ContMigration-VT1/scripts/migration/tee-migration.sh"
+    script_path = "/home/ubuntu/ContMigration-VT1/scripts/migration/tee-migration.sh"
 
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_path = f"{BASE_LOG_PATH}/{teeInfo.containerName}/{timestamp.replace(':', '-')}_{teeInfo.containerName}"

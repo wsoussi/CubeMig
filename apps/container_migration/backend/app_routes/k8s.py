@@ -4,11 +4,15 @@ from utils.k8s_client import k8s_client
 
 router = APIRouter()
 
+@router.get("/clusters")
+async def get_clusters():
+    return {"clusters": k8s_client.list_clusters()}
+
 @router.get("/pods/{cluster}/{namespace}")
 async def get_pods(cluster: str, namespace: str):
     """Get a list of pods in the specified Kubernetes namespace"""
-    client = k8s_client.get_client(cluster)
     try:
+        client = k8s_client.get_client(cluster)
         pods = client.list_namespaced_pod(namespace=namespace)
         podsList = []
         for pod in pods.items:
@@ -28,15 +32,16 @@ async def get_pods(cluster: str, namespace: str):
             podsList.append(pod_info)
         
         return {"pods": podsList}
-    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching pods: {str(e)}")
 
 @router.delete("/pods/{cluster}/{namespace}/{pod_name}")
 async def delete_pod(cluster: str, namespace: str, pod_name: str):
     """Delete a Kubernetes pod by its name."""
-    client = k8s_client.get_client(cluster)
     try:
+        client = k8s_client.get_client(cluster)
         response = client.delete_namespaced_pod(
             name=pod_name,
             namespace=namespace
@@ -44,6 +49,8 @@ async def delete_pod(cluster: str, namespace: str, pod_name: str):
         return {
             "message": f"Pod '{pod_name}' deleted successfully in cluster '{cluster}'"
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         # Handle Kubernetes API exceptions
         raise HTTPException(

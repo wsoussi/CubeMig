@@ -2,7 +2,7 @@ from fastapi import APIRouter
 import sys 
 from models.simulation_info import SimulationInfo
 
-sys.path.append('/home/ubuntu/meierm78/ContMigration-VT1/apps/kubernetes/vuln-spring/')
+sys.path.append('/home/ubuntu/ContMigration-VT1/apps/kubernetes/vuln-spring/')
 
 from vuln_spring_exploit import reverse_shell, data_destruction, log_removal # type: ignore
 

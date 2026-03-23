@@ -255,7 +255,6 @@ Once the backend is running, visit `http://localhost:8000/docs` for interactive 
 
 ## 👥 Contributors
 
-- **Michael Azhari Meier** - Core Development
 - **Rinchen Kolodziejczyk** - Core Development  
 - **Anthony John Mamaril** - Core Development
 - **Wissem Soussi** - Core Development

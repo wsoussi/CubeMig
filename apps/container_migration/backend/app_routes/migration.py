@@ -1,13 +1,13 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from datetime import datetime
-import subprocess
 import os
 import asyncio
-from pathlib import Path
 import re
+from pydantic import BaseModel
 from models.migration_info import MigrationInfo
 from models.alert_model import Alert
 from utils.migration_util import load_config
+from utils.k8s_client import k8s_client
 import pytz
 
 router = APIRouter()
@@ -16,6 +16,26 @@ triggeredMigrations = []
 base_log_path = "/home/ubuntu/contMigration_logs"
 config = load_config()
 timezone = pytz.timezone('Europe/Berlin')
+
+class ManualMigrationRequest(BaseModel):
+    sourceCluster: str
+    targetCluster: str
+    namespace: str
+    podName: str
+    appName: str
+    forensicAnalysis: bool = False
+    AISuggestion: bool = False
+    disableIstioSidecar: bool = False
+
+def _validate_cluster_pair(source_cluster: str, target_cluster: str):
+    if not source_cluster or not target_cluster:
+        raise HTTPException(status_code=400, detail="sourceCluster and targetCluster are required")
+    if source_cluster == target_cluster:
+        raise HTTPException(status_code=400, detail="sourceCluster and targetCluster must be different")
+    if not k8s_client.has_cluster(source_cluster):
+        raise HTTPException(status_code=400, detail=f"Unknown source cluster: {source_cluster}")
+    if not k8s_client.has_cluster(target_cluster):
+        raise HTTPException(status_code=400, detail=f"Unknown target cluster: {target_cluster}")
 
 def _extract_return_code(content: str):
     for line in content.splitlines():
@@ -73,8 +93,10 @@ def _full_log_lines(log_path: str):
 
 def _build_stage_statuses(log_lines, final_status: str):
     stages = [
+        {"key": "pipeline_check", "label": "Pipeline checks", "status": "pending"},
         {"key": "checkpoint", "label": "Checkpoint creation", "status": "pending"},
         {"key": "image", "label": "Image conversion and push", "status": "pending"},
+        {"key": "prepull", "label": "Base image pre-pull", "status": "pending"},
         {"key": "restore", "label": "Restore pod startup", "status": "pending"},
         {"key": "traffic", "label": "Traffic switch", "status": "pending"},
         {"key": "cleanup", "label": "Source cleanup", "status": "pending"},
@@ -82,30 +104,48 @@ def _build_stage_statuses(log_lines, final_status: str):
 
     joined = "\n".join(log_lines)
 
-    if "Creating checkpoint" in joined:
+    if "Destination cluster checks started" in joined:
         stages[0]["status"] = "running"
-    if "-- Checkpoint created --" in joined:
+    if "Global preflight checks started" in joined:
+        stages[0]["status"] = "running"
+    if "Global preflight checks completed" in joined or "Destination cluster checks completed" in joined:
         stages[0]["status"] = "completed"
 
-    if "Convert checkpoint into image" in joined or "Pushing image" in joined:
+    if "Creating checkpoint" in joined:
         stages[1]["status"] = "running"
-    if "Image pushed onto local registy" in joined or "Image pushed onto local registry" in joined:
+    if "-- Checkpoint created --" in joined:
         stages[1]["status"] = "completed"
 
-    if "Waiting for the new pod" in joined:
+    if "Convert checkpoint into image" in joined or "Pushing image" in joined:
         stages[2]["status"] = "running"
-    if " is running --" in joined:
+    if "Image pushed onto local registy" in joined or "Image pushed onto local registry" in joined:
         stages[2]["status"] = "completed"
 
-    if "switching mirroring rule" in joined or "Switching traffic to the new pod" in joined:
+    if "Pre-pull step (base image) started" in joined or "Pre-pulling image" in joined:
         stages[3]["status"] = "running"
-    if "--- Deleting old pod ---" in joined or "-- Migration complete --" in joined:
+    if (
+        "Pre-pull step (base image) completed" in joined
+        or "Pre-pull daemonset cleanup complete" in joined
+        or "Pre-pull step (checkpoint image) completed" in joined
+        or "Pre-pull step (checkpoint image) skipped by design" in joined
+        or "Pre-pull step (checkpoint image) skipped by feature flag" in joined
+    ):
         stages[3]["status"] = "completed"
 
-    if "--- Deleting old pod ---" in joined:
+    if "Waiting for the new pod" in joined:
         stages[4]["status"] = "running"
-    if "Old pod" in joined and "deleted" in joined:
+    if " is running --" in joined:
         stages[4]["status"] = "completed"
+
+    if "switching mirroring rule" in joined or "Switching traffic to the new pod" in joined:
+        stages[5]["status"] = "running"
+    if "--- Deleting old pod ---" in joined or "-- Migration complete --" in joined:
+        stages[5]["status"] = "completed"
+
+    if "--- Deleting old pod ---" in joined:
+        stages[6]["status"] = "running"
+    if "Old pod" in joined and "deleted" in joined:
+        stages[6]["status"] = "completed"
 
     if final_status == "error":
         for stage in reversed(stages):
@@ -149,6 +189,39 @@ def _extract_log_metadata(log_path: str):
         metadata["target_pod_name"] = target_pod_match.group(1).strip()
 
     return metadata
+
+def _fetch_target_runtime_details(metadata: dict):
+    details = {
+        "target_node": "unknown",
+        "recent_k8s_events": []
+    }
+    target_cluster = metadata.get("target_cluster")
+    namespace = metadata.get("namespace")
+    target_pod_name = metadata.get("target_pod_name")
+
+    if not target_cluster or target_cluster == "unknown" or not namespace or namespace == "unknown" or not target_pod_name or target_pod_name == "unknown":
+        return details
+
+    try:
+        client = k8s_client.get_client(target_cluster)
+        pod = client.read_namespaced_pod(name=target_pod_name, namespace=namespace)
+        if pod and pod.spec and pod.spec.node_name:
+            details["target_node"] = pod.spec.node_name
+
+        event_list = client.list_namespaced_event(namespace=namespace, field_selector=f"involvedObject.name={target_pod_name}")
+        events = event_list.items if event_list and event_list.items else []
+        events.sort(key=lambda event: event.last_timestamp or event.event_time or event.first_timestamp or datetime.min)
+        trimmed = events[-8:]
+        details["recent_k8s_events"] = [
+            f"{event.type} {event.reason}: {event.message}"
+            for event in trimmed
+            if event.message
+        ]
+    except Exception:
+        # Best-effort runtime details should never break status endpoint.
+        return details
+
+    return details
 
 def _collect_recent_migrations(limit: int, offset: int):
     entries = []
@@ -234,6 +307,13 @@ async def handle_alerts(alert: Alert):
     for rule_config in config.config:
         if info.rule == rule_config.rule and info.k8s_pod_name not in triggeredMigrations:
             if rule_config.action == "migrate":
+                info.source_cluster = rule_config.cluster
+                info.target_cluster = rule_config.targetCluster
+                if alert.output_fields and alert.output_fields.k8s_ns_name:
+                    info.namespace = alert.output_fields.k8s_ns_name
+                else:
+                    info.namespace = "default"
+                _validate_cluster_pair(info.source_cluster, info.target_cluster)
                 info.forensic_analysis = rule_config.forensic_analysis
                 info.AI_suggestion = rule_config.AI_suggestion
                 triggeredMigrations.append(info.k8s_pod_name)
@@ -280,6 +360,8 @@ async def run_migration_script(info: MigrationInfo, log_path: str):
             cmd.append("--forensic-analysis")
         if info.AI_suggestion:
             cmd.append("--ai-suggestion")
+        if info.disable_istio_sidecar:
+            cmd.append("--disable-istio-sidecar")
     
         # Run the subprocess asynchronously
         process = await asyncio.create_subprocess_exec(
@@ -325,25 +407,19 @@ def handle_log(info: MigrationInfo):
             file.write(f"{datetime.now(timezone)}: Event received. Rule: {info.rule}\n")
 
 @router.post("/migrate")
-async def migrate_pod(request: Request):
-    body = await request.json()
-    source_cluster = body.get("sourceCluster")
-    target_cluster = body.get("targetCluster")
-    namespace = body.get("namespace")
-    pod_name = body.get("podName")
-    app_name = body.get("appName")
-    generate_forensic_report = body.get("forensicAnalysis")
-    generate_AI_suggestion = body.get("AISuggestion")
+async def migrate_pod(body: ManualMigrationRequest):
+    _validate_cluster_pair(body.sourceCluster, body.targetCluster)
     
     info = MigrationInfo(
-        k8s_pod_name=pod_name,
-        container_name=app_name,
+        k8s_pod_name=body.podName,
+        container_name=body.appName,
         migration_type="manual",
-        source_cluster=source_cluster,
-        target_cluster=target_cluster,
-        namespace=namespace,
-        forensic_analysis=generate_forensic_report,
-        AI_suggestion=generate_AI_suggestion,
+        source_cluster=body.sourceCluster,
+        target_cluster=body.targetCluster,
+        namespace=body.namespace,
+        forensic_analysis=body.forensicAnalysis,
+        AI_suggestion=body.AISuggestion,
+        disable_istio_sidecar=body.disableIstioSidecar,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )
     return await trigger_migration(info)
@@ -368,6 +444,7 @@ async def get_migration_status(pod_name: str):
         # Get the most recent log directory
         latest_log_path = max(pod_logs, key=lambda x: x[1])[0]
         metadata = _extract_log_metadata(latest_log_path)
+        runtime_details = _fetch_target_runtime_details(metadata)
         full_log_lines = _full_log_lines(latest_log_path)
         
         # Check for completion indicators
@@ -388,6 +465,7 @@ async def get_migration_status(pod_name: str):
                     "recent_log_lines": _recent_log_lines(latest_log_path),
                     "log_lines": full_log_lines,
                     "stage_statuses": stage_statuses,
+                    **runtime_details,
                     **metadata
                 }
             stage_statuses = _build_stage_statuses(full_log_lines, "error")
@@ -399,6 +477,7 @@ async def get_migration_status(pod_name: str):
                 "recent_log_lines": _recent_log_lines(latest_log_path),
                 "log_lines": full_log_lines,
                 "stage_statuses": stage_statuses,
+                **runtime_details,
                 **metadata
             }
         elif os.path.exists(error_file):
@@ -412,6 +491,7 @@ async def get_migration_status(pod_name: str):
                 "recent_log_lines": _recent_log_lines(latest_log_path),
                 "log_lines": full_log_lines,
                 "stage_statuses": stage_statuses,
+                **runtime_details,
                 **metadata
             }
         else:
@@ -424,6 +504,7 @@ async def get_migration_status(pod_name: str):
                 "recent_log_lines": _recent_log_lines(latest_log_path),
                 "log_lines": full_log_lines,
                 "stage_statuses": stage_statuses,
+                **runtime_details,
                 **metadata
             }
             

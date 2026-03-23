@@ -1,10 +1,9 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
-import { map, Observable } from 'rxjs';
+import { Observable } from 'rxjs';
 import { PodsResponse } from '../model/k8s.model';
 import { MigrationRequest } from '../model/migration-request.model';
 import { MigrationHistoryApiResponse, MigrationStatusResponse } from '../model/migration-status.model';
-import { TreeNode } from 'primeng/api';
 
 @Injectable({
   providedIn: 'root'
@@ -14,6 +13,11 @@ export class K8sService {
   private apiUrl = 'http://160.85.255.146:8000'; // Change this to your FastAPI server URL
 
   constructor(private http: HttpClient) {}
+
+  getClusters(): Observable<{ clusters: string[] }> {
+    const url = `${this.apiUrl}/k8s/clusters`;
+    return this.http.get<{ clusters: string[] }>(url);
+  }
 
   /**
    * Get a list of pods and their statuses from the specified cluster.
