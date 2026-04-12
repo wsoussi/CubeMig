@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: routing-demo
-  namespace: default
+  namespace: istio-enabled
   labels:
     app: routing-demo
     version: v1
@@ -30,7 +30,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.labels['version']
       containers:
-        - image: 10.0.0.180:5000/routing_demo:latest
+        - image: 160.85.255.146:5000/routing_demo:latest
           name: routing-demo
           ports:
             - containerPort: 8080

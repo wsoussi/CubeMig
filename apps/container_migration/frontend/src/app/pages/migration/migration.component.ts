@@ -1,7 +1,7 @@
 import { Component, effect, OnDestroy, OnInit, signal, WritableSignal } from '@angular/core';
 import { MessageService, SelectItem } from 'primeng/api';
 import { K8sService } from '../../service/k8s.service';
-import { catchError, interval, map, of, Subject, switchMap, take, takeUntil, tap } from 'rxjs';
+import { catchError, finalize, interval, map, of, Subject, switchMap, take, takeUntil, tap } from 'rxjs';
 import { Pod, PodsResponse } from '../../model/k8s.model';
 import { MigrationRequest } from '../../model/migration-request.model';
 import { MigrationHistoryApiItem, MigrationHistoryItem, MigrationRuntimeStatus, MigrationStage, MigrationStatusResponse } from '../../model/migration-status.model';
@@ -25,6 +25,10 @@ export class MigrationComponent implements OnInit, OnDestroy{
   isGeneratingAISuggestion = false;
   disableIstioSidecar = false;
   loading = false;
+  routingDemoTrafficSubset = '';
+  trafficToggleLoading = false;
+  /** Kube context for VirtualService <code>routing-demo</code> (separate from migration source — use after migration). */
+  trafficSwitchCluster = '';
   activeMigrationStatus: MigrationRuntimeStatus = 'not_started';
   statusDetail = '';
   statusLogPath = '';
@@ -85,7 +89,9 @@ export class MigrationComponent implements OnInit, OnDestroy{
         const fallbackTarget = options.find((opt) => opt.value !== this.selectedSource);
         this.selectedTarget = fallbackTarget ? String(fallbackTarget.value) : '';
       }
+      this.trafficSwitchCluster = this.selectedSource || (options[0] ? String(options[0].value) : '');
       this.getPodsForSource();
+      this.loadRoutingDemoTrafficSubset();
     });
   }
 
@@ -94,7 +100,13 @@ export class MigrationComponent implements OnInit, OnDestroy{
     if (this.selectedSource === this.selectedTarget) {
       this.selectedTarget = '';
     }
+    this.trafficSwitchCluster = this.selectedSource;
     this.getPodsForSource();
+    this.loadRoutingDemoTrafficSubset();
+  }
+
+  public onTrafficSwitchClusterChange(): void {
+    this.loadRoutingDemoTrafficSubset();
   }
 
   private getPodsForSource() {
@@ -118,6 +130,49 @@ export class MigrationComponent implements OnInit, OnDestroy{
     });
   }
 
+  private loadRoutingDemoTrafficSubset(): void {
+    const cluster = this.trafficSwitchCluster;
+    if (!cluster) {
+      this.routingDemoTrafficSubset = '';
+      return;
+    }
+    this.k8sService.getRoutingDemoTrafficSubset(cluster).pipe(
+      take(1),
+      catchError(() => of({ subset: '' }))
+    ).subscribe((r) => {
+      this.routingDemoTrafficSubset = r.subset || '';
+    });
+  }
+
+  public toggleRoutingDemoTraffic(): void {
+    const cluster = this.trafficSwitchCluster;
+    if (!cluster) {
+      this.messageService.add({ key: 'tst', severity: 'warn', summary: 'Traffic', detail: 'No cluster available.' });
+      return;
+    }
+    this.trafficToggleLoading = true;
+    this.k8sService.toggleRoutingDemoTraffic(cluster).pipe(
+      take(1),
+      finalize(() => {
+        this.trafficToggleLoading = false;
+      })
+    ).subscribe({
+      next: (r) => {
+        this.routingDemoTrafficSubset = r.subset;
+        this.messageService.add({
+          key: 'tst',
+          severity: 'success',
+          summary: 'VirtualService',
+          detail: r.message || `Primary route is now ${r.subset}`
+        });
+      },
+      error: (err) => {
+        const detail = err?.error?.detail ?? err?.message ?? 'Toggle failed';
+        this.messageService.add({ key: 'tst', severity: 'error', summary: 'VirtualService', detail: String(detail) });
+      }
+    });
+  }
+
   public reset(): void {
     console.log(this.selectedNamespace())
     this.selectedSource = '';
@@ -127,6 +182,8 @@ export class MigrationComponent implements OnInit, OnDestroy{
     this.isGeneratingFA = false;
     this.isGeneratingAISuggestion = false;
     this.disableIstioSidecar = false;
+    this.trafficSwitchCluster = this.sourceCluster.length ? String(this.sourceCluster[0].value) : '';
+    this.loadRoutingDemoTrafficSubset();
   }
 
   public areDropdownsFilled(): boolean {

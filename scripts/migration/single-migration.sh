@@ -176,6 +176,40 @@ sanitize_k8s_name() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+|-+$//g; s/-+/-/g'
 }
 
+# Slow/flaky API paths (e.g. single-node cluster-sev-snp): TLS timeouts during long migrations.
+# --validate=false avoids OpenAPI schema fetch (common failure: "failed to download openapi").
+KUBECTL_DEST_TIMEOUT="${KUBECTL_DEST_TIMEOUT:-120s}"
+
+kubectl_apply_dest() {
+  local manifest="$1"
+  local err_context="$2"
+  local attempt max_attempts
+  max_attempts=3
+  for attempt in $(seq 1 "$max_attempts"); do
+    if kubectl apply --request-timeout="$KUBECTL_DEST_TIMEOUT" --validate=false -f "$manifest" >> "$log_file" 2>&1; then
+      return 0
+    fi
+    log "-- kubectl apply failed ($err_context), attempt $attempt/$max_attempts (retry in 5s) --"
+    [[ "$attempt" -lt "$max_attempts" ]] && sleep 5
+  done
+  handle_error "Failed to $err_context"
+}
+
+kubectl_delete_dest_best_effort() {
+  local manifest="$1"
+  local label="$2"
+  local attempt
+  for attempt in 1 2 3; do
+    if kubectl delete --request-timeout="$KUBECTL_DEST_TIMEOUT" -f "$manifest" --ignore-not-found=true >> "$log_file" 2>&1; then
+      return 0
+    fi
+    log "-- kubectl delete failed ($label), attempt $attempt/3 (retry in 5s) --"
+    sleep 5
+  done
+  log "-- Warning: Failed to delete after retries ($label) --"
+  return 0
+}
+
 prepull_image_on_destination() {
   local image_ref="$1"
   local run_id="$2"
@@ -204,7 +238,7 @@ prepull_image_on_destination() {
       "$template" > "$ds_manifest" || handle_error "Failed to generate pre-pull daemonset manifest"
 
   log "-- Pre-pulling image \"$image_ref\" on destination cluster using daemonset \"$ds_name\" --"
-  kubectl apply -f "$ds_manifest" >> "$log_file" 2>&1 || handle_error "Failed to apply pre-pull daemonset"
+  kubectl_apply_dest "$ds_manifest" "apply pre-pull daemonset"
 
   # Best-effort wait: give kubelet time to pull the image on destination nodes.
   sleep 20
@@ -213,7 +247,7 @@ prepull_image_on_destination() {
   # Detect the common HTTP/HTTPS mismatch from kubelet event text.
   if kubectl -n kube-system describe pods -l "app=${ds_name}" 2>/dev/null | grep -q "http: server gave HTTP response to HTTPS client"; then
     log "-- Detected registry TLS mismatch while pre-pulling $image_ref --"
-    kubectl delete -f "$ds_manifest" --ignore-not-found=true >> "$log_file" 2>&1 || true
+    kubectl_delete_dest_best_effort "$ds_manifest" "pre-pull daemonset (registry retry path)"
 
     if [[ "$attempt" -eq 1 ]]; then
       ensure_insecure_registry_on_destination
@@ -224,7 +258,7 @@ prepull_image_on_destination() {
     handle_error "Pre-pull failed after insecure-registry setup attempt for image: $image_ref"
   fi
 
-  kubectl delete -f "$ds_manifest" --ignore-not-found=true >> "$log_file" 2>&1 || log "-- Warning: Failed to delete pre-pull daemonset --"
+  kubectl_delete_dest_best_effort "$ds_manifest" "pre-pull daemonset cleanup"
   log "-- Pre-pull daemonset cleanup complete for $image_ref --"
 }
 
@@ -242,7 +276,7 @@ ensure_insecure_registry_on_destination() {
 
   insecure_registry_setup_attempted=true
   log "-- Applying on-demand insecure-registry daemonset (destination cluster) --"
-  kubectl apply -f "$setup_manifest" >> "$log_file" 2>&1 || handle_error "Failed to apply insecure-registry daemonset"
+  kubectl_apply_dest "$setup_manifest" "apply insecure-registry daemonset"
 
   # Give daemonset time to write config/restart CRI-O where needed.
   sleep 20
@@ -250,7 +284,7 @@ ensure_insecure_registry_on_destination() {
   kubectl -n kube-system logs -l app=setup-insecure-registry --tail=50 >> "$log_file" 2>&1 || true
 
   # The setup is only needed on demand; do not keep it running permanently.
-  kubectl delete -f "$setup_manifest" --ignore-not-found=true >> "$log_file" 2>&1 || log "-- Warning: Failed to delete insecure-registry daemonset --"
+  kubectl_delete_dest_best_effort "$setup_manifest" "insecure-registry daemonset"
   log "-- On-demand insecure-registry setup completed and cleaned up --"
 }
 
@@ -268,13 +302,13 @@ ensure_criu_tcp_close_on_destination() {
 
   criu_tcp_close_setup_attempted=true
   log "-- Applying preflight CRIU tcp-close daemonset (destination cluster) --"
-  kubectl apply -f "$setup_manifest" >> "$log_file" 2>&1 || handle_error "Failed to apply CRIU tcp-close daemonset"
+  kubectl_apply_dest "$setup_manifest" "apply CRIU tcp-close daemonset"
 
   sleep 10
   kubectl -n kube-system get pods -l app=setup-criu-tcp-close -o wide >> "$log_file" 2>&1 || true
   kubectl -n kube-system logs -l app=setup-criu-tcp-close --tail=50 >> "$log_file" 2>&1 || true
 
-  kubectl delete -f "$setup_manifest" --ignore-not-found=true >> "$log_file" 2>&1 || log "-- Warning: Failed to delete CRIU tcp-close daemonset --"
+  kubectl_delete_dest_best_effort "$setup_manifest" "criu-tcp-close daemonset"
   log "-- Preflight CRIU tcp-close setup completed and cleaned up --"
 }
 
@@ -564,6 +598,10 @@ fi
 log "-- Applying restore yaml file --"
 
 startTime=$(date +%s%3N)
+# Pod label "cluster" (Downward API -> /etc/podinfo/cluster) matches destination kube context name
+export DEST_CLUSTER="$destCluster"
+log "-- Restore pod label cluster (DEST_CLUSTER): $DEST_CLUSTER --"
+
 templateContainerName="$containerName"
 if [[ "$templateContainerName" == *"-restore-"* ]]; then
   templateContainerName="${templateContainerName%%-restore-*}"
@@ -580,9 +618,22 @@ if [[ ! -f "$restoreTemplate" ]]; then
   handle_error "Restore template not found: $restoreTemplate"
 fi
 
+# Without a Service on the destination cluster, no Endpoints exist for routing-demo → Istio subset v2 has no backends.
+if [[ "$namespace" == "istio-enabled" && "$templateContainerName" == "routing-demo" ]]; then
+  log "-- Ensuring routing-demo Service + DestinationRule on destination (Endpoints + subset labels) --"
+  rd_svc="/home/ubuntu/teemig/CubeMig/apps/kubernetes/routing_demo/routing-demo-service.yaml"
+  rd_dr="/home/ubuntu/teemig/CubeMig/apps/kubernetes/routing_demo/routing-demo-destination-rule.yaml"
+  if [[ -f "$rd_svc" && -f "$rd_dr" ]]; then
+    kubectl_apply_dest "$rd_svc" "apply routing-demo Service on destination"
+    kubectl_apply_dest "$rd_dr" "apply routing-demo DestinationRule on destination"
+  else
+    log "-- Warning: Missing $rd_svc or $rd_dr — skip Service/DR on destination --"
+  fi
+fi
+
 sed -e "s/${templateContainerName}-restore/${newPodName}/g" \
     -e "s|^\([[:space:]]*image:[[:space:]]*\).*|\1${registry_checkpoint_image_ref}|g" \
-    "$restoreTemplate" > "$restoreManifest" || handle_error "Failed to generate restore yaml file"
+    "$restoreTemplate" | envsubst '${DEST_CLUSTER}' > "$restoreManifest" || handle_error "Failed to generate restore yaml file"
 
 if [[ "$disableIstioSidecar" == true ]]; then
   if grep -q '^  annotations:' "$restoreManifest"; then
@@ -597,7 +648,7 @@ if [[ "$disableIstioSidecar" == true ]]; then
   log "-- Added sidecar.istio.io/inject=false to restore manifest for debug run --"
 fi
 
-kubectl apply -f "$restoreManifest" || handle_error "Failed to apply restore yaml file"
+kubectl_apply_dest "$restoreManifest" "apply restore yaml file"
 
 log "-- Waiting for the new pod \"$newPodName\" to be ready --"
 # Wait with timeout and fail fast on known terminal container errors.
@@ -701,13 +752,34 @@ migrationTotalTime=$(($(date +%s%3N) - $migrationStartTime))
 
 log "------------------------------------------------------------------"
 
-log "--- Deleting old pod ---"
+log "--- Stopping source workload (scale to 0 when possible, else pod delete) ---"
 podDeletionStartTime=$(date +%s%3N)
 kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster"
 kubectl config set-context --current --namespace="$namespace"
-kubectl delete pod $podName || handle_error "Failed to delete pod"
+
+source_deploy=""
+source_sts=""
+rs_name=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath='{.metadata.ownerReferences[?(@.kind=="ReplicaSet")].name}' 2>/dev/null || true)
+if [[ -n "$rs_name" ]]; then
+  source_deploy=$(kubectl get rs "$rs_name" -n "$namespace" -o jsonpath='{.metadata.ownerReferences[?(@.kind=="Deployment")].name}' 2>/dev/null || true)
+fi
+if [[ -z "$source_deploy" ]]; then
+  source_sts=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath='{.metadata.ownerReferences[?(@.kind=="StatefulSet")].name}' 2>/dev/null || true)
+fi
+
+if [[ -n "$source_deploy" ]]; then
+  kubectl scale deploy "$source_deploy" -n "$namespace" --replicas=0 || handle_error "Failed to scale deployment $source_deploy to 0"
+  log "-- Scaled deployment \"$source_deploy\" to 0 replicas (avoids immediate pod respawn) --"
+elif [[ -n "$source_sts" ]]; then
+  kubectl scale sts "$source_sts" -n "$namespace" --replicas=0 || handle_error "Failed to scale statefulset $source_sts to 0"
+  log "-- Scaled statefulset \"$source_sts\" to 0 replicas --"
+else
+  log "-- No Deployment/StatefulSet owner for \"$podName\"; falling back to pod delete --"
+  kubectl delete pod "$podName" -n "$namespace" || handle_error "Failed to delete pod"
+  log "-- Pod \"$podName\" deleted --"
+fi
+
 podDeletionTime=$(($(date +%s%3N) - $podDeletionStartTime))
-log "-- Old pod \"$podName\" deleted --"
 
 log "------------------------------------------------------------------"
 

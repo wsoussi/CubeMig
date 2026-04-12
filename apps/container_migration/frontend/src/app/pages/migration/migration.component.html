@@ -37,6 +37,26 @@
             }
         </div>
 
+        <div class="card mt-3 traffic-switch-card">
+            <h5>routing-demo traffic switch</h5>
+            <p class="text-sm text-color-secondary mb-0">After a migration, switch the primary <code>/whoami</code> route between deployment <strong>v1</strong> and restore <strong>v2</strong> before you start another run.</p>
+            @if (sourceCluster.length > 0) {
+                <div class="field mt-3 mb-3">
+                    <label for="trafficSwitchCluster" class="block mb-2">Cluster (VirtualService <code>routing-demo</code> in <code>istio-enabled</code>)</label>
+                    <p-dropdown inputId="trafficSwitchCluster" [options]="sourceCluster" [(ngModel)]="trafficSwitchCluster" (onChange)="onTrafficSwitchClusterChange()" placeholder="Select cluster" [style]="{'width': '100%'}"></p-dropdown>
+                </div>
+                <div class="traffic-switch-actions flex flex-column sm:flex-row flex-wrap align-items-stretch sm:align-items-center justify-content-between gap-3">
+                    <div class="text-sm">
+                        Current primary subset:
+                        <strong class="ml-1">{{ routingDemoTrafficSubset || '…' }}</strong>
+                    </div>
+                    <button pButton type="button" label="Toggle v1 ↔ v2" class="p-button-secondary align-self-start sm:align-self-center" (click)="toggleRoutingDemoTraffic()" [loading]="trafficToggleLoading" [disabled]="trafficToggleLoading || !trafficSwitchCluster"></button>
+                </div>
+            } @else {
+                <p class="text-sm mt-3 mb-0 text-color-secondary">No clusters available from the API.</p>
+            }
+        </div>
+
         <div class="card mt-3">
             <h5>Recent migrations</h5>
             <p-table [value]="migrationHistory" [tableStyle]="{'min-width': '34rem'}" responsiveLayout="scroll">

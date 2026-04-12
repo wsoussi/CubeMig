@@ -1,8 +1,34 @@
 from datetime import datetime, timedelta, timezone
+import json
+import subprocess
 from fastapi import APIRouter, HTTPException
-from utils.k8s_client import k8s_client 
+from pydantic import BaseModel, Field
+from utils.k8s_client import k8s_client
 
 router = APIRouter()
+
+ROUTING_DEMO_VS_NAME = "routing-demo"
+ROUTING_DEMO_NAMESPACE = "istio-enabled"
+ROUTING_DEMO_SUBSET_JSON_PATH = "/spec/http/0/route/0/destination/subset"
+
+
+class RoutingDemoTrafficClusterBody(BaseModel):
+    cluster: str = Field(..., description="Kube context where the VirtualService routing-demo is patched")
+
+
+def _kubectl(cluster: str, args: list[str], timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["kubectl", "--context", cluster, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _require_cluster(cluster: str):
+    if not k8s_client.has_cluster(cluster):
+        raise HTTPException(status_code=400, detail=f"Unknown cluster context: {cluster}")
 
 @router.get("/clusters")
 async def get_clusters():
@@ -57,6 +83,99 @@ async def delete_pod(cluster: str, namespace: str, pod_name: str):
             status_code=500,
             detail=f"Failed to delete pod '{pod_name}' in namespace {namespace} in cluster '{cluster}': {str(e)}",
         )
+
+
+@router.get("/routing-demo/traffic-subset/{cluster}")
+async def get_routing_demo_traffic_subset(cluster: str):
+    """Return the primary /whoami route subset (v1 or v2) for VirtualService routing-demo."""
+    _require_cluster(cluster)
+    proc = _kubectl(
+        cluster,
+        [
+            "get",
+            "virtualservice",
+            ROUTING_DEMO_VS_NAME,
+            "-n",
+            ROUTING_DEMO_NAMESPACE,
+            "-o",
+            f"jsonpath={{.spec.http[0].route[0].destination.subset}}",
+        ],
+    )
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=404,
+            detail=(proc.stderr or proc.stdout or "kubectl failed").strip(),
+        )
+    subset = (proc.stdout or "").strip()
+    return {"cluster": cluster, "subset": subset}
+
+
+@router.post("/routing-demo/toggle-traffic")
+async def toggle_routing_demo_traffic(body: RoutingDemoTrafficClusterBody):
+    """Flip primary route subset between v1 and v2 (same JSON patch as single-migration traffic switch)."""
+    cluster = body.cluster
+    _require_cluster(cluster)
+
+    get_proc = _kubectl(
+        cluster,
+        [
+            "get",
+            "virtualservice",
+            ROUTING_DEMO_VS_NAME,
+            "-n",
+            ROUTING_DEMO_NAMESPACE,
+            "-o",
+            f"jsonpath={{.spec.http[0].route[0].destination.subset}}",
+        ],
+    )
+    if get_proc.returncode != 0:
+        raise HTTPException(
+            status_code=404,
+            detail=(get_proc.stderr or get_proc.stdout or "VirtualService not found").strip(),
+        )
+    current = (get_proc.stdout or "").strip()
+    if current == "v1":
+        new_subset = "v2"
+    elif current == "v2":
+        new_subset = "v1"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Current subset is {current!r}; only v1 and v2 are supported for toggle.",
+        )
+
+    patch = [
+        {
+            "op": "replace",
+            "path": ROUTING_DEMO_SUBSET_JSON_PATH,
+            "value": new_subset,
+        }
+    ]
+    patch_proc = _kubectl(
+        cluster,
+        [
+            "patch",
+            "virtualservice",
+            ROUTING_DEMO_VS_NAME,
+            "-n",
+            ROUTING_DEMO_NAMESPACE,
+            "--type=json",
+            "-p",
+            json.dumps(patch),
+        ],
+    )
+    if patch_proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(patch_proc.stderr or patch_proc.stdout or "patch failed").strip(),
+        )
+
+    return {
+        "cluster": cluster,
+        "previous_subset": current,
+        "subset": new_subset,
+        "message": f"VirtualService {ROUTING_DEMO_VS_NAME} primary route is now {new_subset}",
+    }
 
 
 def format_age(age: timedelta) -> str:

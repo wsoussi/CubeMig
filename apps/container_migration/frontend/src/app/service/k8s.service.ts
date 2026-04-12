@@ -55,4 +55,21 @@ export class K8sService {
     return this.http.get<MigrationHistoryApiResponse>(url);
   }
 
+  getRoutingDemoTrafficSubset(cluster: string): Observable<{ cluster: string; subset: string }> {
+    const url = `${this.apiUrl}/k8s/routing-demo/traffic-subset/${encodeURIComponent(cluster)}`;
+    return this.http.get<{ cluster: string; subset: string }>(url);
+  }
+
+  toggleRoutingDemoTraffic(cluster: string): Observable<{
+    cluster: string;
+    previous_subset: string;
+    subset: string;
+    message: string;
+  }> {
+    const url = `${this.apiUrl}/k8s/routing-demo/toggle-traffic`;
+    return this.http.post<{ cluster: string; previous_subset: string; subset: string; message: string }>(url, {
+      cluster
+    });
+  }
+
 }

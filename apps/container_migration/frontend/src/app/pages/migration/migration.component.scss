@@ -1,3 +1,11 @@
+.traffic-switch-card {
+  border-left: 4px solid var(--primary-color, #3b82f6);
+
+  .traffic-switch-actions {
+    padding-top: 0.25rem;
+  }
+}
+
 .migration-monitor-card {
   .monitor-header {
     display: flex;
