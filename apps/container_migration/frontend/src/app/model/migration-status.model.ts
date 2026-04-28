@@ -5,6 +5,8 @@ export interface MigrationStage {
   key: string;
   label: string;
   status: MigrationStageStatus;
+  /** Wall-clock span for this stage when log lines include UTC timestamps (newer runs). */
+  duration_ms?: number | null;
 }
 
 export interface MigrationStatusResponse {
@@ -23,6 +25,8 @@ export interface MigrationStatusResponse {
   recent_log_lines?: string[];
   log_lines?: string[];
   stage_statuses?: MigrationStage[];
+  /** Source workload stopped → restore pod running (requires timestamped migration logs). */
+  downtime_ms?: number | null;
 }
 
 export interface MigrationHistoryItem {
@@ -33,6 +37,7 @@ export interface MigrationHistoryItem {
   targetPodName?: string;
   logLines?: string[];
   stageStatuses?: MigrationStage[];
+  downtimeMs?: number | null;
   startedAt: Date;
   finishedAt?: Date;
   status: MigrationRuntimeStatus;
@@ -49,6 +54,7 @@ export interface MigrationHistoryApiItem {
   target_pod_name?: string;
   log_lines?: string[];
   stage_statuses?: MigrationStage[];
+  downtime_ms?: number | null;
   status: 'running' | 'completed' | 'error';
   summary: string;
   log_path: string;

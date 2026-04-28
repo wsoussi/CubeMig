@@ -28,20 +28,37 @@ spec:
             - |
               set -eu
               REGISTRY="${REGISTRY:-160.85.255.146:5000}"
+              PNET_PREFLIGHT_REGISTRY="${PNET_PREFLIGHT_REGISTRY:-10.0.0.1:5000}"
+              PNET_WIREGUARD_MIGRATION_REGISTRY="${PNET_WIREGUARD_MIGRATION_REGISTRY:-10.10.10.1:5000}"
               CONF_DIR="/host/etc/containers/registries.conf.d"
               CONF_FILE="${CONF_DIR}/99-cubemig-insecure.conf"
-              TMP_FILE="/tmp/99-cubemig-insecure.conf"
 
               mkdir -p "${CONF_DIR}"
-              cat > "${TMP_FILE}" <<EOF
-              [[registry]]
-              location = "${REGISTRY}"
-              insecure = true
-              EOF
 
-              # Restart CRI-O only when config changed.
-              if [ ! -f "${CONF_FILE}" ] || ! cmp -s "${TMP_FILE}" "${CONF_FILE}"; then
-                cp "${TMP_FILE}" "${CONF_FILE}"
+              if [ ! -f "${CONF_FILE}" ]; then
+                touch "${CONF_FILE}"
+              fi
+
+              changed=0
+              ensure_registry_entry() {
+                local registry="$1"
+                if ! grep -qxF "location = \"${registry}\"" "${CONF_FILE}"; then
+                  cat <<EOF >> "${CONF_FILE}"
+              [[registry]]
+              location = "${registry}"
+              insecure = true
+
+              EOF
+                  changed=1
+                fi
+              }
+
+              # Append-only and idempotent: keep existing entries, add only missing ones.
+              ensure_registry_entry "${REGISTRY}"
+              ensure_registry_entry "${PNET_PREFLIGHT_REGISTRY}"
+              ensure_registry_entry "${PNET_WIREGUARD_MIGRATION_REGISTRY}"
+
+              if [ "${changed}" -eq 1 ]; then
                 nsenter -t 1 -m -u -i -n -p -- systemctl restart crio || true
               fi
 
@@ -50,6 +67,10 @@ spec:
           env:
             - name: REGISTRY
               value: "160.85.255.146:5000"
+            - name: PNET_PREFLIGHT_REGISTRY
+              value: "10.0.0.1:5000"
+            - name: PNET_WIREGUARD_MIGRATION_REGISTRY
+              value: "10.10.10.1:5000"
           volumeMounts:
             - name: host-etc
               mountPath: /host/etc

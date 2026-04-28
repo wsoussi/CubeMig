@@ -8,8 +8,12 @@
                     <p-dropdown [options]="sourceCluster" [(ngModel)]="selectedSource" (onChange)="onSourceClusterChange()" placeholder="Select the source cluster" [style]="{'width': '100%'}"></p-dropdown>
                 </div>
                 <div class="field col">
-                    <p-dropdown [options]="targetCluster" [(ngModel)]="selectedTarget" placeholder="Select the target cluster" [style]="{'width': '100%'}"></p-dropdown>
+                    <p-dropdown [options]="targetCluster" [(ngModel)]="selectedTarget" (onChange)="onTargetClusterChange()" placeholder="Select the target cluster" [style]="{'width': '100%'}"></p-dropdown>
                 </div>
+            </div>
+            <div class="mb-3">
+                <label for="registryAddress" class="block mb-2">Destination registry (host:port)</label>
+                <input id="registryAddress" pInputText type="text" [(ngModel)]="registryAddress" placeholder="160.85.255.146:5000" class="w-full"/>
             </div>
             <div class="mb-3">
                 <p-dropdown [options]="namespaceList" [(ngModel)]="selectedNamespace" placeholder="Select the namespace" [style]="{'width': '100%'}"></p-dropdown>
@@ -39,7 +43,7 @@
 
         <div class="card mt-3 traffic-switch-card">
             <h5>routing-demo traffic switch</h5>
-            <p class="text-sm text-color-secondary mb-0">After a migration, switch the primary <code>/whoami</code> route between deployment <strong>v1</strong> and restore <strong>v2</strong> before you start another run.</p>
+            <p class="text-sm text-color-secondary mb-0">After a migration, switch the primary <code>/whoami</code> route between deployment <strong>v1</strong> and restore <strong>v2</strong> before you start another run. If a migration left Istio <strong>fault.abort</strong> (HTTP 503) on, use <em>Clear fault (503)</em> to remove it without changing the v1/v2 subset.</p>
             @if (sourceCluster.length > 0) {
                 <div class="field mt-3 mb-3">
                     <label for="trafficSwitchCluster" class="block mb-2">Cluster (VirtualService <code>routing-demo</code> in <code>istio-enabled</code>)</label>
@@ -48,58 +52,106 @@
                 <div class="traffic-switch-actions flex flex-column sm:flex-row flex-wrap align-items-stretch sm:align-items-center justify-content-between gap-3">
                     <div class="text-sm">
                         Current primary subset:
-                        <strong class="ml-1">{{ routingDemoTrafficSubset || '…' }}</strong>
+                        <strong class="ml-1">{{ routingDemoTrafficSubset || 'not available' }}</strong>
                     </div>
-                    <button pButton type="button" label="Toggle v1 ↔ v2" class="p-button-secondary align-self-start sm:align-self-center" (click)="toggleRoutingDemoTraffic()" [loading]="trafficToggleLoading" [disabled]="trafficToggleLoading || !trafficSwitchCluster"></button>
+                    <div class="flex flex-column sm:flex-row flex-wrap gap-2 align-self-start sm:align-self-center">
+                        <button pButton type="button" label="Toggle v1 ↔ v2" class="p-button-secondary" (click)="toggleRoutingDemoTraffic()" [loading]="trafficToggleLoading" [disabled]="trafficToggleLoading || faultClearLoading || !trafficSwitchCluster || !canToggleRoutingDemoTraffic()"></button>
+                        <button pButton type="button" label="Clear fault (503)" class="p-button-outlined" (click)="clearRoutingDemoFault()" [loading]="faultClearLoading" [disabled]="faultClearLoading || trafficToggleLoading || !trafficSwitchCluster || !routingDemoTrafficSubsetAvailable" pTooltip="Removes Istio fault.abort from VirtualService routing-demo (e.g. after a failed migration)" tooltipPosition="top"></button>
+                        <button pButton type="button" label="Scale routing-demo to replicas=1" class="p-button-outlined p-button-help" (click)="scaleRoutingDemoToOne()" [loading]="replicaScaleLoading" [disabled]="replicaScaleLoading || trafficToggleLoading || faultClearLoading || !trafficSwitchCluster"></button>
+                    </div>
                 </div>
             } @else {
                 <p class="text-sm mt-3 mb-0 text-color-secondary">No clusters available from the API.</p>
             }
         </div>
 
-        <div class="card mt-3">
-            <h5>Recent migrations</h5>
-            <p-table [value]="migrationHistory" [tableStyle]="{'min-width': '34rem'}" responsiveLayout="scroll">
-                <ng-template pTemplate="header">
-                    <tr>
-                        <th>Pod</th>
-                        <th>Path</th>
-                        <th>Target pod</th>
-                        <th>Status</th>
-                        <th>Started</th>
-                    </tr>
-                </ng-template>
-                <ng-template pTemplate="body" let-item>
-                    <tr class="recent-row" (click)="toggleRecentLog(item.logPath)">
-                        <td>{{ item.podName }}</td>
-                        <td>{{ item.sourceCluster }} -> {{ item.targetCluster }}</td>
-                        <td>{{ item.targetPodName || 'unknown' }}</td>
-                        <td>
-                            <span class="status-badge small" [ngClass]="item.status">{{ item.status }}</span>
-                        </td>
-                        <td>{{ item.startedAt | date:'short' }}</td>
-                    </tr>
-                    @if(selectedRecentLogPath === item.logPath) {
-                        <tr class="recent-log-row">
-                            <td colspan="5">
-                                <div class="inline-log-wrapper">
-                                    <strong>Logs for this run</strong>
-                                    <pre>{{ (item.logLines && item.logLines.length > 0) ? item.logLines.join('\n') : 'No logs available for this run.' }}</pre>
+        <div class="card mt-3 probe-card">
+            <h5>Backend HTTP probe (curl)</h5>
+            <p class="text-sm text-color-secondary mb-3">
+                Trigger curls from backend and monitor response time plus downtime periods.
+            </p>
+            <div class="p-formgrid grid">
+                <div class="field col-12">
+                    <label for="probeUrl" class="block mb-2">Target URL</label>
+                    <input id="probeUrl" pInputText type="text" [(ngModel)]="probeUrl" placeholder="http://10.0.0.29:32366/whoami" [disabled]="probeRunning" class="w-full"/>
+                </div>
+                <div class="field col-12 md:col-4">
+                    <label for="probeIntervalMs" class="block mb-2">Interval (ms)</label>
+                    <input id="probeIntervalMs" pInputText type="number" min="200" step="100" [(ngModel)]="probeIntervalMs" [disabled]="probeRunning" class="w-full"/>
+                </div>
+                <div class="field col-12 md:col-4">
+                    <label for="probeConnectTimeoutS" class="block mb-2">Connect timeout (s)</label>
+                    <input id="probeConnectTimeoutS" pInputText type="number" min="1" step="1" [(ngModel)]="probeConnectTimeoutS" [disabled]="probeRunning" class="w-full"/>
+                </div>
+                <div class="field col-12 md:col-4">
+                    <label for="probeMaxTimeS" class="block mb-2">Max time (s)</label>
+                    <input id="probeMaxTimeS" pInputText type="number" min="1" step="1" [(ngModel)]="probeMaxTimeS" [disabled]="probeRunning" class="w-full"/>
+                </div>
+            </div>
+            <div class="flex flex-wrap gap-2 mb-3">
+                <button pButton type="button" label="Start probe" (click)="startHttpProbe()" [disabled]="probeRunning || !probeUrl || probeInFlight"></button>
+                <button pButton type="button" label="Stop probe" class="p-button-outlined p-button-secondary" (click)="stopHttpProbe()" [disabled]="!probeRunning"></button>
+                <button pButton type="button" label="Clear history" class="p-button-outlined" (click)="clearHttpProbeHistory()" [disabled]="probeSamples.length === 0 && !probeLastOutput"></button>
+                <span class="probe-status" [class.error]="probeStatusMessage.toLowerCase().includes('error')">{{ probeStatusMessage }}</span>
+            </div>
+            <div class="probe-metrics mb-3">
+                <div><strong>Samples:</strong> {{ probeSamples.length }}</div>
+                <div><strong>Latest:</strong> {{ roundMs(getProbeLatestSample()?.totalMs || 0) }} ms</div>
+                <div><strong>Average:</strong> {{ roundMs(getProbeAvgMs()) }} ms</div>
+                <div><strong>Max:</strong> {{ roundMs(getProbeMaxMs()) }} ms</div>
+                <div><strong>Probe #:</strong> {{ getProbeLatestSample()?.seq || '-' }}</div>
+                <div><strong>Counter property:</strong> {{ getProbeCurrentCounter() }}</div>
+                <div><strong>Last counter before downtime/filter:</strong> {{ getLatestStateCheck().beforeCounter == null ? 'n/a' : getLatestStateCheck().beforeCounter }}</div>
+                <div><strong>First counter after recovery:</strong> {{ getLatestStateCheck().afterCounter == null ? 'n/a' : getLatestStateCheck().afterCounter }}</div>
+            </div>
+            @if (getLatestStateCheck().hasWindow && getLatestStateCheck().stateNotSame) {
+                <div class="probe-warning mb-3">
+                    <span class="warning-icon">⚠</span>
+                    <span>state is not the same (counter after recovery is not x+1)</span>
+                </div>
+            }
+            <div class="probe-legend mb-2">
+                <span class="ok-dot"></span><span>OK</span>
+                <span class="down-dot ml-3"></span><span>Downtime / error</span>
+            </div>
+            <div class="probe-chart">
+                @if (probeSamples.length > 0) {
+                    <div class="probe-chart-grid">
+                        <div class="probe-y-axis">
+                            <span>{{ roundMs(getProbeMaxMs()) }} ms</span>
+                            <span>{{ roundMs(getProbeMidMs()) }} ms</span>
+                            <span>0 ms</span>
+                        </div>
+                        <div class="probe-bars">
+                            @for (sample of probeSamples; track sample.seq) {
+                                <div class="probe-bar-wrapper" [pTooltip]="'#' + sample.seq + ' | ' + formatProbeTimestamp(sample.timestamp) + ' | ' + roundMs(sample.totalMs) + ' ms | HTTP ' + sample.httpCode + ' | counter=' + (sample.counter == null ? 'n/a' : sample.counter)" tooltipPosition="top">
+                                    <div class="probe-bar" [ngClass]="sample.ok ? 'ok' : 'down'" [style.height.%]="getProbeBarHeight(sample.totalMs)"></div>
                                 </div>
-                            </td>
-                        </tr>
-                    }
-                </ng-template>
-                <ng-template pTemplate="emptymessage">
-                    <tr>
-                        <td colspan="5">No migration history yet.</td>
-                    </tr>
-                </ng-template>
-            </p-table>
-            <div class="history-pagination mt-2">
-                <button pButton label="Previous" class="p-button-outlined p-button-secondary" [disabled]="historyPage === 0" (click)="prevHistoryPage()"></button>
-                <span>Page {{ historyPage + 1 }}</span>
-                <button pButton label="Next" class="p-button-outlined" [disabled]="!hasMoreHistory" (click)="nextHistoryPage()"></button>
+                            }
+                        </div>
+                    </div>
+                } @else {
+                    <p class="text-sm text-color-secondary mb-0">No probe data yet.</p>
+                }
+            </div>
+            @if (probeDowntimeWindows.length > 0) {
+                <div class="mt-3">
+                    <strong>Detected downtime windows</strong>
+                    <ul class="probe-downtime-list">
+                        @for (window of probeDowntimeWindows; track window.start.getTime()) {
+                            <li>
+                                {{ formatProbeTimestamp(window.start) }} - {{ window.end ? formatProbeTimestamp(window.end) : 'ongoing' }}
+                                | before={{ window.beforeCounter == null ? 'n/a' : window.beforeCounter }}
+                                | after={{ window.afterCounter == null ? 'n/a' : window.afterCounter }}
+                                @if (window.stateNotSame) { | ⚠ state is not the same }
+                            </li>
+                        }
+                    </ul>
+                </div>
+            }
+            <div class="log-output mt-3">
+                <div class="log-title">Last server output</div>
+                <pre>{{ probeLastOutput || 'No probe output yet.' }}</pre>
             </div>
         </div>
 
@@ -130,11 +182,24 @@
                 <div><small class="text-color-secondary">Target node: {{ statusTargetNode }}</small></div>
             }
 
+            @if(downtimeMs != null) {
+                <div class="downtime-summary">
+                    <span class="downtime-label">Downtime</span>
+                    <span class="downtime-value" [pTooltip]="'From stopping the source workload after checkpoint until the restore pod reports Running.'" tooltipPosition="top">{{ formatDuration(downtimeMs) }}</span>
+                </div>
+            }
+
             <div class="step-list">
+                <div class="step-list-header">
+                    <span>Pipeline stage</span>
+                    <span class="step-h-duration">Duration</span>
+                    <span class="step-h-status">Status</span>
+                </div>
                 @for(stage of stageStatuses; track stage.key; let i = $index) {
                     <div class="step-item" [ngClass]="'stage-' + stage.status">
                         <span class="step-number">{{ i + 1 }}.</span>
-                        <span>{{ stage.label }}</span>
+                        <span class="step-label">{{ stage.label }}</span>
+                        <span class="step-duration">{{ formatStageTiming(stage, timerUiTick) }}</span>
                         <span class="step-status">{{ stage.status }}</span>
                     </div>
                 }
@@ -158,6 +223,54 @@
                 } @else {
                     <pre>No Kubernetes events captured yet.</pre>
                 }
+            </div>
+        </div>
+
+        <div class="card mt-3">
+            <h5>Recent migrations</h5>
+            <p-table [value]="migrationHistory" [tableStyle]="{'min-width': '34rem'}" responsiveLayout="scroll">
+                <ng-template pTemplate="header">
+                    <tr>
+                        <th>Pod</th>
+                        <th>Path</th>
+                        <th>Downtime</th>
+                        <th>Target pod</th>
+                        <th>Status</th>
+                        <th>Started</th>
+                    </tr>
+                </ng-template>
+                <ng-template pTemplate="body" let-item>
+                    <tr class="recent-row" (click)="toggleRecentLog(item.logPath)">
+                        <td>{{ item.podName }}</td>
+                        <td>{{ item.sourceCluster }} -> {{ item.targetCluster }}</td>
+                        <td class="tabular-nums">{{ formatDuration(item.downtimeMs) }}</td>
+                        <td>{{ item.targetPodName || 'unknown' }}</td>
+                        <td>
+                            <span class="status-badge small" [ngClass]="item.status">{{ item.status }}</span>
+                        </td>
+                        <td>{{ item.startedAt | date:'short' }}</td>
+                    </tr>
+                    @if(selectedRecentLogPath === item.logPath) {
+                        <tr class="recent-log-row">
+                            <td colspan="6">
+                                <div class="inline-log-wrapper">
+                                    <strong>Logs for this run</strong>
+                                    <pre>{{ (item.logLines && item.logLines.length > 0) ? item.logLines.join('\n') : 'No logs available for this run.' }}</pre>
+                                </div>
+                            </td>
+                        </tr>
+                    }
+                </ng-template>
+                <ng-template pTemplate="emptymessage">
+                    <tr>
+                        <td colspan="6">No migration history yet.</td>
+                    </tr>
+                </ng-template>
+            </p-table>
+            <div class="history-pagination mt-2">
+                <button pButton label="Previous" class="p-button-outlined p-button-secondary" [disabled]="historyPage === 0" (click)="prevHistoryPage()"></button>
+                <span>Page {{ historyPage + 1 }}</span>
+                <button pButton label="Next" class="p-button-outlined" [disabled]="!hasMoreHistory" (click)="nextHistoryPage()"></button>
             </div>
         </div>
     </div>

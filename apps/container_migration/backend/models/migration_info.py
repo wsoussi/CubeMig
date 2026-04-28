@@ -10,6 +10,7 @@ class MigrationInfo(BaseModel):
      source_cluster: Optional[str] = None
      target_cluster: Optional[str] = None
      namespace: Optional[str] = None
+     registry_address: Optional[str] = None
      forensic_analysis: Optional[bool] = None
      AI_suggestion: Optional[bool] = None
      disable_istio_sidecar: Optional[bool] = None

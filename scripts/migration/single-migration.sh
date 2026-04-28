@@ -1,4 +1,8 @@
 #!/bin/bash
+# Basic / cold stateful migration: CRIU checkpoint, wait until the .tar is visible on
+# the migration host NFS mirror, chmod, then scale source to 0 (checkpoint finished
+# writing; no further requests). Scaling before the archive exists can prevent the
+# file from appearing on NFS (kubelet/pod teardown vs. sync).
 forensicAnalysis=false
 AISuggestion=false
 disableIstioSidecar=false
@@ -11,6 +15,7 @@ sourceCluster=""
 destCluster=""
 namespace="default"
 cluster1Registry="${CLUSTER1_REGISTRY:-160.85.255.146:5000}"
+PNET_WIREGUARD_MIGRATION_REGISTRY="${PNET_WIREGUARD_MIGRATION_REGISTRY:-10.10.10.1:5000}"
 
 # Parse command-line options
 log_dir_specified=false
@@ -18,7 +23,7 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         -fa|--forensic-analysis) forensicAnalysis=true ;;
         -ai|--ai-suggestion) AISuggestion=true ;;
-        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--disable-istio-sidecar] --"; exit 0 ;;
+        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] --"; echo "-- Env: PRE_CHECKPOINT_ISTIO_503=true|false (default true): inject HTTP 503 on routing-demo VS before checkpoint; cleared when switching to v2. --"; exit 0 ;;
         --log-dir) 
             shift
             custom_log_dir=$1
@@ -36,6 +41,10 @@ while [[ "$#" -gt 0 ]]; do
             shift
             namespace=$1
             ;;
+        --registry)
+            shift
+            cluster1Registry=$1
+            ;;
         --disable-istio-sidecar)
             disableIstioSidecar=true
             ;;
@@ -49,7 +58,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 if [ -z "$podName" ]; then
-    echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--disable-istio-sidecar] --"
+    echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] --"
     exit 1
 fi
 
@@ -66,14 +75,20 @@ fi
 # If user did not provide a namespace, keep default above
 # namespace already set to "default" unless overridden by --namespace
 
-source /home/ubuntu/natwork_demo/CubeMig/scripts/migration/.env
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/.env"
+fi
 
 insecure_registry_setup_attempted=false
 criu_tcp_close_setup_attempted=false
+source_workload_stopped=false
+istio_pre_checkpoint_503_applied=false
 
-# Function to log messages
+# Function to log messages (UTC ISO8601 prefix enables stage/downtime timing in the API/UI)
 log() {
-  echo "$1" >> "$log_file"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) $1" >> "$log_file"
 }
 
 # Function to handle errors
@@ -142,6 +157,13 @@ if [[ "$preflightClusterChecks" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss])$ ]]; then
   preflightClusterChecks=true
 else
   preflightClusterChecks=false
+fi
+
+preCheckpointIstio503="${PRE_CHECKPOINT_ISTIO_503:-true}"
+if [[ "$preCheckpointIstio503" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss])$ ]]; then
+  preCheckpointIstio503=true
+else
+  preCheckpointIstio503=false
 fi
 
 kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster"
@@ -215,7 +237,7 @@ prepull_image_on_destination() {
   local run_id="$2"
   local step_name="$3"
   local attempt="${4:-1}"
-  local template="/home/ubuntu/teemig/CubeMig/scripts/migration/yaml/prepull-base-image-daemonset.yaml"
+  local template="${SCRIPT_DIR}/yaml/prepull-base-image-daemonset.yaml"
   local safe_image_name
   local ds_name
   local ds_manifest
@@ -263,7 +285,7 @@ prepull_image_on_destination() {
 }
 
 ensure_insecure_registry_on_destination() {
-  local setup_manifest="/home/ubuntu/teemig/CubeMig/scripts/utils/setup/insecure-registry-daemonset.yaml"
+  local setup_manifest="${SCRIPT_DIR}/../utils/setup/insecure-registry-daemonset.yaml"
 
   if [[ "$insecure_registry_setup_attempted" == true ]]; then
     log "-- Insecure-registry setup already attempted in this migration run; skipping --"
@@ -289,7 +311,7 @@ ensure_insecure_registry_on_destination() {
 }
 
 ensure_criu_tcp_close_on_destination() {
-  local setup_manifest="/home/ubuntu/teemig/CubeMig/scripts/utils/setup/criu-tcp-close-daemonset.yaml"
+  local setup_manifest="${SCRIPT_DIR}/../utils/setup/criu-tcp-close-daemonset.yaml"
 
   if [[ "$criu_tcp_close_setup_attempted" == true ]]; then
     log "-- CRIU tcp-close setup already attempted in this migration run; skipping --"
@@ -356,7 +378,14 @@ run_global_cluster_checks() {
 
 resolve_base_image_for_prepull() {
   local source_ref="$1"
+  local source_image_id_ref="${2:-}"
   local fallback_default="${BASE_IMAGE_PREPULL_FALLBACK:-}"
+
+  # Prefer the exact runtime image digest from source pod status for CRIU restore compatibility.
+  if [[ -n "$source_image_id_ref" ]]; then
+    echo "$source_image_id_ref"
+    return
+  fi
 
   if [[ "$source_ref" == *":checkpoint"* ]]; then
     if [[ -n "$fallback_default" ]]; then
@@ -372,6 +401,63 @@ resolve_base_image_for_prepull() {
   fi
 
   echo "$source_ref"
+}
+
+normalize_image_id_for_pull() {
+  local raw_image_id="${1:-}"
+  raw_image_id="${raw_image_id#docker-pullable://}"
+  raw_image_id="${raw_image_id#docker://}"
+  echo "$raw_image_id"
+}
+
+rewrite_registry_for_pnet_destination() {
+  local image_ref="${1:-}"
+  local pnet_target_registry="$PNET_WIREGUARD_MIGRATION_REGISTRY"
+
+  if [[ -z "$image_ref" ]]; then
+    echo "$image_ref"
+    return
+  fi
+
+  case "$image_ref" in
+    10.0.0.180:5000/*|10.0.0.1:5000/*|160.85.255.146:5000/*)
+      echo "${pnet_target_registry}/${image_ref#*/}"
+      ;;
+    *)
+      echo "$image_ref"
+      ;;
+  esac
+}
+
+# Basic/cold: no requests on source after durable checkpoint .tar is on NFS — call after chmod, before buildah.
+stop_source_workload_after_checkpoint() {
+  log "--- Stopping source workload (scale to 0 when possible, else pod delete) ---"
+  kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster"
+  kubectl config set-context --current --namespace="$namespace"
+
+  local source_deploy_local=""
+  local source_sts_local=""
+  local rs_name_local
+  rs_name_local=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath='{.metadata.ownerReferences[?(@.kind=="ReplicaSet")].name}' 2>/dev/null || true)
+  if [[ -n "$rs_name_local" ]]; then
+    source_deploy_local=$(kubectl get rs "$rs_name_local" -n "$namespace" -o jsonpath='{.metadata.ownerReferences[?(@.kind=="Deployment")].name}' 2>/dev/null || true)
+  fi
+  if [[ -z "$source_deploy_local" ]]; then
+    source_sts_local=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath='{.metadata.ownerReferences[?(@.kind=="StatefulSet")].name}' 2>/dev/null || true)
+  fi
+
+  if [[ -n "$source_deploy_local" ]]; then
+    kubectl scale deploy "$source_deploy_local" -n "$namespace" --replicas=0 || handle_error "Failed to scale deployment $source_deploy_local to 0"
+    log "-- Scaled deployment \"$source_deploy_local\" to 0 replicas (immediately after checkpoint; source no longer serves) --"
+  elif [[ -n "$source_sts_local" ]]; then
+    kubectl scale sts "$source_sts_local" -n "$namespace" --replicas=0 || handle_error "Failed to scale statefulset $source_sts_local to 0"
+    log "-- Scaled statefulset \"$source_sts_local\" to 0 replicas (immediately after checkpoint) --"
+  else
+    log "-- No Deployment/StatefulSet owner for \"$podName\"; deleting pod after checkpoint --"
+    kubectl delete pod "$podName" -n "$namespace" || handle_error "Failed to delete pod"
+    log "-- Pod \"$podName\" deleted (immediately after checkpoint) --"
+  fi
+  source_workload_stopped=true
 }
 
 summarize_performance() {
@@ -471,11 +557,20 @@ currentCluster=$(kubectl config current-context) || handle_error "Failed to get 
 log "Source cluster: $currentCluster"
 
 log "Target cluster: $destCluster"
+destClusterNormalized="$(echo "$destCluster" | tr '[:upper:]' '[:lower:]')"
+if [[ "$destClusterNormalized" == "cluster-pnet" || "$destClusterNormalized" == "pnet" ]]; then
+  cluster1Registry="$PNET_WIREGUARD_MIGRATION_REGISTRY"
+  enableCheckpointPrepull=true
+  log "-- PNET destination detected: overriding migration image registry to $cluster1Registry (WireGuard route) --"
+  log "-- PNET destination detected: forcing checkpoint image pre-pull --"
+fi
 log "Namespace: $namespace"
+log "Destination registry: $cluster1Registry"
 log "Disable Istio sidecar: $disableIstioSidecar"
 log "Enable checkpoint pre-pull: $enableCheckpointPrepull"
 log "Preflight destination setup: $preflightDestinationSetup"
 log "Preflight cluster checks: $preflightClusterChecks"
+log "Pre-checkpoint Istio 503 (routing-demo): $preCheckpointIstio503"
 
 log "Forensic analysis: $forensicAnalysis"
 log "AI suggestion: $AISuggestion"
@@ -488,41 +583,206 @@ else
 fi
 
 
-# Step 2: Get pod, container names, and node where the pod is running
+# Pod / container / image metadata (source cluster; context set at script start)
 containerName=$(kubectl get pods $podName -o jsonpath='{.spec.containers[0].name}') || handle_error "Failed to get container name"
 nodename=$(kubectl get pods $podName -o jsonpath='{.spec.nodeName}') || handle_error "Failed to get node name"
-# Step 3: Checkpoint via curl
+source_image_ref=$(kubectl get pod $podName -o jsonpath='{.spec.containers[0].image}') || handle_error "Failed to get image name"
+# Important for Istio-injected pods: select imageID by container name, not by index,
+# because containerStatuses ordering can differ and pick istio-proxy by mistake.
+source_image_id_raw=$(kubectl get pod "$podName" -o jsonpath="{.status.containerStatuses[?(@.name==\"$containerName\")].imageID}" 2>/dev/null || true)
+source_image_id_ref="$(normalize_image_id_for_pull "$source_image_id_raw")"
+
+templateContainerName="$containerName"
+if [[ "$templateContainerName" == *"-restore-"* ]]; then
+  templateContainerName="${templateContainerName%%-restore-*}"
+elif [[ "$templateContainerName" == *"-restore" ]]; then
+  templateContainerName="${templateContainerName%-restore}"
+fi
+
+# Single timestamp for pre-pull daemonset names and restore pod name (stable for this run)
+timestampSuffix=$(date +"%Y%m%d-%H%M%S")
+prepull_run_id="$(echo "$timestampSuffix" | tr -d '-')"
+newPodName="${templateContainerName}-restore-${timestampSuffix}"
+newPodName="${newPodName:0:63}"
+restoreTemplate="${SCRIPT_DIR}/yaml/restore_${templateContainerName}.yaml"
+restoreManifest="${log_dir}/restore_${newPodName}.yaml"
+
+if [[ ! -f "$restoreTemplate" ]]; then
+  handle_error "Restore template not found: $restoreTemplate"
+fi
+
+# --- Destination preparation BEFORE checkpoint (minimize time from dump to restore) ---
+migrationStartTime=$(date +%s%3N)
+log "-- Destination preparation (pre-checkpoint) started --"
+log "-- Order: prepare target cluster → CRIU checkpoint on source → image push → optional checkpoint pre-pull → restore → traffic → source cleanup --"
+
+kubectl config use-context "$destCluster" || handle_error "Failed to switch context to $destCluster"
+kubectl config set-context --current --namespace="$namespace"
+
+if [[ "$preflightDestinationSetup" == true ]]; then
+  log "-- Destination runtime preflight (insecure-registry + CRIU tcp-close) --"
+  ensure_insecure_registry_on_destination
+  ensure_criu_tcp_close_on_destination
+  log "-- Destination runtime preflight completed --"
+else
+  log "-- Destination runtime preflight skipped by feature flag --"
+  log "-- Set PREFLIGHT_DESTINATION_SETUP=true to enable destination setup --"
+fi
+
+if [[ -n "$source_image_id_ref" ]]; then
+  log "-- Source runtime imageID detected for pre-pull: $source_image_id_ref --"
+else
+  log "-- Warning: Source runtime imageID unavailable; falling back to image ref for pre-pull: $source_image_ref --"
+fi
+prepull_base_image_ref="$(resolve_base_image_for_prepull "$source_image_ref" "$source_image_id_ref")"
+if [[ "$destClusterNormalized" == "cluster-pnet" || "$destClusterNormalized" == "pnet" ]]; then
+  prepull_base_image_ref="$(rewrite_registry_for_pnet_destination "$prepull_base_image_ref")"
+fi
+log "-- Pre-pull step (base image) started --"
+log "-- Base image chosen for pre-pull: $prepull_base_image_ref --"
+prepull_image_on_destination "$prepull_base_image_ref" "$prepull_run_id" "base"
+log "-- Pre-pull step (base image) completed --"
+
+# Without a Service on the destination cluster, no Endpoints exist for routing-demo → Istio subset v2 has no backends.
+if [[ "$namespace" == "istio-enabled" && "$templateContainerName" == "routing-demo" ]]; then
+  log "-- Ensuring routing-demo Service + DestinationRule on destination (before checkpoint) --"
+  rd_svc="${SCRIPT_DIR}/../../apps/kubernetes/routing_demo/routing-demo-service.yaml"
+  rd_dr="${SCRIPT_DIR}/../../apps/kubernetes/routing_demo/routing-demo-destination-rule.yaml"
+  if [[ -f "$rd_svc" && -f "$rd_dr" ]]; then
+    kubectl_apply_dest "$rd_svc" "apply routing-demo Service on destination"
+    kubectl_apply_dest "$rd_dr" "apply routing-demo DestinationRule on destination"
+  else
+    log "-- Warning: Missing $rd_svc or $rd_dr — skip Service/DR on destination --"
+  fi
+fi
+
+log "-- Destination preparation (pre-checkpoint) completed --"
+
+# --- CRIU checkpoint on source (kubelet client certs must match source context name) ---
+kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster for checkpoint"
+kubectl config set-context --current --namespace="$namespace"
+currentCluster="$sourceCluster"
+
+# NFS mirror: each node's kubelet checkpoint dir is exported as <CHECKPOINT_NFS_ROOT>/<nodeName>/.
+checkpoint_nfs_root="${CHECKPOINT_NFS_ROOT:-/home/ubuntu/nfs/checkpoints}"
+nodename=$(kubectl get pods "$podName" -o jsonpath='{.spec.nodeName}') || handle_error "Failed to get node name (before checkpoint; after dest prep)"
+checkpoint_dir="${checkpoint_nfs_root}/${nodename}"
+log "-- Checkpoint (source cluster only): NFS mirror $checkpoint_nfs_root/<source-node>/; pod $podName runs on source node \"$nodename\" → expect .tar under $checkpoint_dir (unrelated to dest cluster \"$destCluster\") --"
+
+# Variant A: explicit 503 before checkpoint so v1 does not serve new requests while dumping / waiting on NFS.
+if [[ "$preCheckpointIstio503" == true && "$namespace" == "istio-enabled" && "$templateContainerName" == "routing-demo" ]]; then
+  if kubectl get virtualservice routing-demo >/dev/null 2>&1; then
+    log "-- Pre-checkpoint: Istio fault.abort HTTP 503 on VirtualService routing-demo (stops v1 state advancing until restore) --"
+    if kubectl patch virtualservice routing-demo --type=json -p='[
+      {"op":"add","path":"/spec/http/0/fault","value":{"abort":{"httpStatus":503,"percentage":{"value":100}}}}
+    ]' >>"$log_file" 2>&1; then
+      istio_pre_checkpoint_503_applied=true
+    elif kubectl patch virtualservice routing-demo --type=json -p='[
+      {"op":"replace","path":"/spec/http/0/fault","value":{"abort":{"httpStatus":503,"percentage":{"value":100}}}}
+    ]' >>"$log_file" 2>&1; then
+      istio_pre_checkpoint_503_applied=true
+    else
+      log "-- Warning: Could not inject pre-checkpoint 503 on VirtualService routing-demo --"
+    fi
+  else
+    log "-- Pre-checkpoint 503 skipped: VirtualService routing-demo not found --"
+  fi
+fi
 
 log "-- Creating checkpoint for $podName on $nodename --"
 
-migrationStartTime=$(date +%s%3N)
-
+checkpoint_epoch_before_curl=$(($(date +%s) - 3))
 startTime=$(date +%s%3N)
-checkpoint_output=$(curl -sk -X POST "https://$nodename:10250/checkpoint/${namespace}/${podName}/${containerName}" \
+_checkpoint_body_tmp=$(mktemp)
+checkpoint_http=$(curl -sk -X POST "https://$nodename:10250/checkpoint/${namespace}/${podName}/${containerName}" \
   --key /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.key \
   --cacert /home/ubuntu/.kube/pki/$currentCluster-ca.crt \
-  --cert /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.crt) || handle_error "Failed to create checkpoint"
+  --cert /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.crt \
+  -o "$_checkpoint_body_tmp" -w '%{http_code}') || { rm -f "$_checkpoint_body_tmp"; handle_error "Failed to invoke kubelet checkpoint API (curl error)"; }
+checkpoint_output=$(cat "$_checkpoint_body_tmp")
+rm -f "$_checkpoint_body_tmp"
 checkpointTime=$(($(date +%s%3N) - $startTime))
+log "kubelet checkpoint HTTP status: $checkpoint_http"
 log "checkpoint output: $checkpoint_output"
-log "-- Checkpoint created --"
+if [[ "$checkpoint_http" =~ ^[45][0-9][0-9]$ ]]; then
+  handle_error "Kubelet checkpoint API returned HTTP $checkpoint_http (no archive expected). Body: $checkpoint_output"
+fi
+log "-- Checkpoint request accepted (HTTP $checkpoint_http); waiting for .tar on NFS --"
+
+# Kubelet JSON lists the node path; NFS export on this host uses the same basename under .../checkpoints/<nodename>/
+checkpoint_basename=""
+if command -v jq >/dev/null 2>&1; then
+  _ck_item=$(echo "$checkpoint_output" | jq -r '.items[0] // empty' 2>/dev/null || true)
+  if [[ -n "$_ck_item" && "$_ck_item" != "null" ]]; then
+    checkpoint_basename=$(basename "$_ck_item")
+    log "-- Expected checkpoint basename from kubelet: $checkpoint_basename --"
+  fi
+fi
 
 log "------------------------------------------------------------------"
 
-log "-- Determining latest checkpoint for ${podName} --"
+log "-- Waiting for checkpoint archive on NFS for ${podName} (pod still up until file visible; then scale to 0) --"
 
 startTime=$(date +%s%3N)
-# Step 4: Get path to newest checkpoint file with node name incorporated
-checkpointfile=$(ls -1t /home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-${podName}_${namespace}-${containerName}-*.tar | head -n 1)
+checkpoint_glob="checkpoint-${podName}_${namespace}-${containerName}-*.tar"
+checkpointfile=""
+checkpoint_wait_max_seconds="${CHECKPOINT_NFS_WAIT_SECONDS:-180}"
+checkpoint_wait_interval_seconds="${CHECKPOINT_NFS_WAIT_INTERVAL:-2}"
+elapsed_wait=0
+while [[ "$elapsed_wait" -lt "$checkpoint_wait_max_seconds" ]]; do
+  if [[ -d "$checkpoint_dir" ]]; then
+    if [[ -n "$checkpoint_basename" && -f "$checkpoint_dir/$checkpoint_basename" ]]; then
+      checkpointfile="$checkpoint_dir/$checkpoint_basename"
+      break
+    fi
+    # shellcheck disable=SC2012
+    checkpointfile=$(ls -1t "$checkpoint_dir"/$checkpoint_glob 2>/dev/null | head -n 1)
+    if [[ -n "$checkpointfile" && -f "$checkpointfile" ]]; then
+      break
+    fi
+    checkpointfile=""
+  fi
+  sleep "$checkpoint_wait_interval_seconds"
+  elapsed_wait=$((elapsed_wait + checkpoint_wait_interval_seconds))
+  if (( elapsed_wait % 20 == 0 )); then
+    log "-- Still waiting for checkpoint .tar on NFS (${elapsed_wait}s / ${checkpoint_wait_max_seconds}s, dir=${checkpoint_dir}) --"
+  fi
+done
 latestCheckpointTime=$(($(date +%s%3N) - $startTime))
 
-log "-- Latest checkpoint found --"
+if [[ -z "$checkpointfile" || ! -f "$checkpointfile" ]]; then
+  log "-- Checkpoint file not found under $checkpoint_dir (glob: $checkpoint_glob) after ${checkpoint_wait_max_seconds}s --"
+  log "-- Same workload on this node (any pod replica, newest first) — if your pod is missing, kubelet did not write this pod's archive: --"
+  # shellcheck disable=SC2012
+  ls -1t "$checkpoint_dir"/checkpoint-*_"${namespace}-${containerName}-"*.tar 2>/dev/null | head -15 >>"$log_file" || true
+  log "-- Scanning all nodes under $checkpoint_nfs_root for $checkpoint_glob newer than checkpoint request (stale node name / export layout): --"
+  _fb_line=""
+  if command -v find >/dev/null 2>&1; then
+    # shellcheck disable=SC2012
+    _fb_line=$(find "$checkpoint_nfs_root" -mindepth 2 -maxdepth 2 -type f -newermt "@${checkpoint_epoch_before_curl}" \
+      -name "checkpoint-${podName}_${namespace}-${containerName}-*.tar" -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -n1)
+  fi
+  if [[ -n "$_fb_line" ]]; then
+    checkpointfile="${_fb_line#*$'\t'}"
+    if [[ -n "$checkpointfile" && -f "$checkpointfile" ]]; then
+      log "-- Using checkpoint from fallback path (not under expected node dir): $checkpointfile --"
+    fi
+  fi
+fi
+
+if [[ -z "$checkpointfile" || ! -f "$checkpointfile" ]]; then
+  log "-- Directory listing (diagnostics): --"
+  ls -la "$checkpoint_dir" >> "$log_file" 2>&1 || log "-- Cannot list $checkpoint_dir --"
+  handle_error "Checkpoint archive not found on NFS for pod ${podName} (glob: $checkpoint_glob). Listing shows other replicas but not this pod — inspect kubelet/CRIU on node ${nodename} and checkpoint output above."
+fi
+
+log "-- Latest checkpoint found: $checkpointfile --"
 
 log "------------------------------------------------------------------"
 
 log "-- Changing permissions for checkpoint file --"
 
 startTime=$(date +%s%3N)
-# Step 4.5: Change permissions of the checkpoint file
 sudo chmod a+rwx "$checkpointfile" || handle_error "Failed to change permissions of checkpoint file"
 permissionTime=$(($(date +%s%3N) - $startTime))
 
@@ -530,12 +790,16 @@ log "-- Permissions changed --"
 
 log "------------------------------------------------------------------"
 
-source_image_ref=$(kubectl get pod $podName -o jsonpath='{.spec.containers[0].image}') || handle_error "Failed to get image name"
+log "-- Post-checkpoint: stop source workload (replicas=0 / pod delete) — archive is on NFS --"
+podDeletionStartTime=$(date +%s%3N)
+stop_source_workload_after_checkpoint
+podDeletionTime=$(($(date +%s%3N) - $podDeletionStartTime))
+
+log "------------------------------------------------------------------"
 
 log "-- Convert checkpoint into image --"
 
 startTime=$(date +%s%3N)
-# Step 5: Convert checkpoint to image
 log "Checkpoint image name: $source_image_ref"
 log "Checkpoint file: $checkpointfile"
 newcontainer=$(buildah from --tls-verify=false "$source_image_ref") || handle_error "Failed to create new container"
@@ -554,12 +818,10 @@ log "Checkpoint image tag: $checkpoint_image_tag"
 log "-- Commiting new image --"
 
 startTime=$(date +%s%3N)
-#sudo buildah commit $newcontainer $checkpoint_image_name:checkpoint
 buildah commit $newcontainer "$local_checkpoint_image_ref" || handle_error "Failed to commit new image"
 buildah rm $newcontainer || handle_error "Failed to remove new container"
 
 log "-- Pushing image \"$registry_checkpoint_image_ref\" to local registry --"
-# Step 6: Push the image to local registry
 buildah push --tls-verify=false "localhost/$local_checkpoint_image_ref" "$registry_checkpoint_image_ref" || handle_error "Failed to push image to local registry"
 pushImageTime=$(($(date +%s%3N) - $startTime))
 
@@ -567,25 +829,9 @@ log "-- Image pushed onto local registy --"
 
 log "------------------------------------------------------------------"
 
-# Step 9: Apply the updated YAML file
 kubectl config use-context "$destCluster" || handle_error "Failed to switch context to $destCluster"
 kubectl config set-context --current --namespace="$namespace"
-if [[ "$preflightDestinationSetup" == true ]]; then
-  log "-- Destination preflight started (insecure-registry + CRIU tcp-close) --"
-  ensure_insecure_registry_on_destination
-  ensure_criu_tcp_close_on_destination
-  log "-- Destination preflight completed --"
-else
-  log "-- Destination preflight skipped by feature flag --"
-  log "-- Set PREFLIGHT_DESTINATION_SETUP=true to enable destination setup --"
-fi
-timestampSuffix=$(date +"%Y%m%d-%H%M%S")
-prepull_run_id="$(echo "$timestampSuffix" | tr -d '-')"
-prepull_base_image_ref="$(resolve_base_image_for_prepull "$source_image_ref")"
-log "-- Pre-pull step (base image) started --"
-log "-- Base image chosen for pre-pull: $prepull_base_image_ref --"
-prepull_image_on_destination "$prepull_base_image_ref" "$prepull_run_id" "base"
-log "-- Pre-pull step (base image) completed --"
+
 if [[ "$enableCheckpointPrepull" == true ]]; then
   log "-- Pre-pull step (checkpoint image) started --"
   prepull_image_on_destination "$registry_checkpoint_image_ref" "$prepull_run_id" "checkpoint"
@@ -598,38 +844,8 @@ fi
 log "-- Applying restore yaml file --"
 
 startTime=$(date +%s%3N)
-# Pod label "cluster" (Downward API -> /etc/podinfo/cluster) matches destination kube context name
 export DEST_CLUSTER="$destCluster"
 log "-- Restore pod label cluster (DEST_CLUSTER): $DEST_CLUSTER --"
-
-templateContainerName="$containerName"
-if [[ "$templateContainerName" == *"-restore-"* ]]; then
-  templateContainerName="${templateContainerName%%-restore-*}"
-elif [[ "$templateContainerName" == *"-restore" ]]; then
-  templateContainerName="${templateContainerName%-restore}"
-fi
-
-newPodName="${templateContainerName}-restore-${timestampSuffix}"
-newPodName="${newPodName:0:63}"
-restoreTemplate="/home/ubuntu/teemig/CubeMig/scripts/migration/yaml/restore_${templateContainerName}.yaml"
-restoreManifest="${log_dir}/restore_${newPodName}.yaml"
-
-if [[ ! -f "$restoreTemplate" ]]; then
-  handle_error "Restore template not found: $restoreTemplate"
-fi
-
-# Without a Service on the destination cluster, no Endpoints exist for routing-demo → Istio subset v2 has no backends.
-if [[ "$namespace" == "istio-enabled" && "$templateContainerName" == "routing-demo" ]]; then
-  log "-- Ensuring routing-demo Service + DestinationRule on destination (Endpoints + subset labels) --"
-  rd_svc="/home/ubuntu/teemig/CubeMig/apps/kubernetes/routing_demo/routing-demo-service.yaml"
-  rd_dr="/home/ubuntu/teemig/CubeMig/apps/kubernetes/routing_demo/routing-demo-destination-rule.yaml"
-  if [[ -f "$rd_svc" && -f "$rd_dr" ]]; then
-    kubectl_apply_dest "$rd_svc" "apply routing-demo Service on destination"
-    kubectl_apply_dest "$rd_dr" "apply routing-demo DestinationRule on destination"
-  else
-    log "-- Warning: Missing $rd_svc or $rd_dr — skip Service/DR on destination --"
-  fi
-fi
 
 sed -e "s/${templateContainerName}-restore/${newPodName}/g" \
     -e "s|^\([[:space:]]*image:[[:space:]]*\).*|\1${registry_checkpoint_image_ref}|g" \
@@ -706,7 +922,7 @@ if [[ "$pod_running" == true ]]; then
   podReadyTime=$(($(date +%s%3N) - $startTime))
 
   selected_virtualservice=""
-  kubectl config use-context "$currentCluster" || handle_error "Failed to switch context to $currentCluster"
+  kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster for traffic switch"
   kubectl config set-context --current --namespace="$namespace"
   if kubectl get virtualservice "$appName" >/dev/null 2>&1; then
     selected_virtualservice="$appName"
@@ -731,55 +947,51 @@ if [[ "$pod_running" == true ]]; then
   elif [[ "$namespace" == "istio-enabled" ]]; then
     log "-- Switching traffic to the new pod --"
     if [[ -n "$selected_virtualservice" ]]; then
-      kubectl patch virtualservice "$selected_virtualservice" --type='json' -p='[
-        {
-          "op": "replace",
-          "path": "/spec/http/0/route/0/destination/subset",
-          "value": "v2"
+      if [[ "$istio_pre_checkpoint_503_applied" == true && "$selected_virtualservice" == "routing-demo" ]]; then
+        kubectl patch virtualservice "$selected_virtualservice" --type=json -p='[
+          {"op":"remove","path":"/spec/http/0/fault"},
+          {"op":"replace","path":"/spec/http/0/route/0/destination/subset","value":"v2"}
+        ]' >>"$log_file" 2>&1 || {
+          log "-- Warning: combined remove fault + route v2 failed; removing fault then patching subset --"
+          kubectl patch virtualservice "$selected_virtualservice" --type=json -p='[{"op":"remove","path":"/spec/http/0/fault"}]' >>"$log_file" 2>&1 || true
+          kubectl patch virtualservice "$selected_virtualservice" --type=json -p='[{"op":"replace","path":"/spec/http/0/route/0/destination/subset","value":"v2"}]' || handle_error "Failed to redirect traffic to new app"
         }
-      ]' || handle_error "Failed to redirect traffic to new app"
+      else
+        kubectl patch virtualservice "$selected_virtualservice" --type='json' -p='[
+          {
+            "op": "replace",
+            "path": "/spec/http/0/route/0/destination/subset",
+            "value": "v2"
+          }
+        ]' || handle_error "Failed to redirect traffic to new app"
+      fi
     else
       log "-- Warning: No VirtualService found (expected \"$appName\" or \"routing-demo\"); skipping traffic switch --"
     fi
+  else
+    log "-- No Istio VirtualService patch for this workload (not mmt-probe, namespace not istio-enabled) --"
   fi
+  log "-- Traffic switch step completed --"
 else
   log "-- Warning: $newPodName did not start within 5 minutes, but migration artifacts are in place --"
   log "-- You may need to check the pod status manually --"
   podReadyTime=$(($(date +%s%3N) - $startTime))
+  log "-- Traffic switch skipped (restore pod not running) --"
 fi
 
 migrationTotalTime=$(($(date +%s%3N) - $migrationStartTime))
 
 log "------------------------------------------------------------------"
 
-log "--- Stopping source workload (scale to 0 when possible, else pod delete) ---"
-podDeletionStartTime=$(date +%s%3N)
-kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster"
-kubectl config set-context --current --namespace="$namespace"
-
-source_deploy=""
-source_sts=""
-rs_name=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath='{.metadata.ownerReferences[?(@.kind=="ReplicaSet")].name}' 2>/dev/null || true)
-if [[ -n "$rs_name" ]]; then
-  source_deploy=$(kubectl get rs "$rs_name" -n "$namespace" -o jsonpath='{.metadata.ownerReferences[?(@.kind=="Deployment")].name}' 2>/dev/null || true)
-fi
-if [[ -z "$source_deploy" ]]; then
-  source_sts=$(kubectl get pod "$podName" -n "$namespace" -o jsonpath='{.metadata.ownerReferences[?(@.kind=="StatefulSet")].name}' 2>/dev/null || true)
-fi
-
-if [[ -n "$source_deploy" ]]; then
-  kubectl scale deploy "$source_deploy" -n "$namespace" --replicas=0 || handle_error "Failed to scale deployment $source_deploy to 0"
-  log "-- Scaled deployment \"$source_deploy\" to 0 replicas (avoids immediate pod respawn) --"
-elif [[ -n "$source_sts" ]]; then
-  kubectl scale sts "$source_sts" -n "$namespace" --replicas=0 || handle_error "Failed to scale statefulset $source_sts to 0"
-  log "-- Scaled statefulset \"$source_sts\" to 0 replicas --"
+if [[ "$source_workload_stopped" != true ]]; then
+  log "-- Warning: Source workload was not stopped after checkpoint; stopping now --"
+  podDeletionStartTime=$(date +%s%3N)
+  stop_source_workload_after_checkpoint
+  podDeletionTime=$(($(date +%s%3N) - $podDeletionStartTime))
 else
-  log "-- No Deployment/StatefulSet owner for \"$podName\"; falling back to pod delete --"
-  kubectl delete pod "$podName" -n "$namespace" || handle_error "Failed to delete pod"
-  log "-- Pod \"$podName\" deleted --"
+  log "-- Source workload already stopped immediately after checkpoint (no duplicate scale-down) --"
 fi
-
-podDeletionTime=$(($(date +%s%3N) - $podDeletionStartTime))
+log "-- Source workload cleanup completed --"
 
 log "------------------------------------------------------------------"
 
@@ -790,8 +1002,8 @@ log "-- Performance summary created --"
 
 if [ "$forensicAnalysis" == true ]; then
   log "-- Performing forensic analysis --"
-  sudo chmod 770 /home/ubuntu/teemig/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh
-  /home/ubuntu/teemig/CubeMig/scripts/utils/forensic_analysis/forensic_analysis.sh "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
+  sudo chmod 770 "${SCRIPT_DIR}/../utils/forensic_analysis/forensic_analysis.sh"
+  "${SCRIPT_DIR}/../utils/forensic_analysis/forensic_analysis.sh" "$checkpointfile" "$log_dir" || handle_error "Failed to perform forensic analysis"
   log "-- Forensic analysis complete --"
 fi
 
@@ -806,13 +1018,14 @@ log "------------------------------------------------------------------"
 # Improved cleanup: Clean by application name, not individual pod names
 # Extract base app name (vuln-spring, vuln-redis, atomic-red, etc.)
 baseAppName=$(echo "$containerName" | sed 's/-[0-9].*$//')
-checkpointDir="/home/ubuntu/nfs/checkpoints/${nodename}/checkpoint-*_${namespace}-${baseAppName}-*.tar"
+checkpoint_nfs_root="${CHECKPOINT_NFS_ROOT:-/home/ubuntu/nfs/checkpoints}"
+checkpointDir="${checkpoint_nfs_root}/${nodename}/checkpoint-*_${namespace}-${baseAppName}-*.tar"
 log "-- Deleting old checkpoints for application ${baseAppName} if more than 5 are saved --"
 
 checkpointCount=$(ls $checkpointDir 2>/dev/null | wc -l)
 if [ "$checkpointCount" -gt 5 ]; then
   excessCount=$((checkpointCount - 5))
-  log "-- $checkpointCount checkpoint files for ${baseAppName} on $nodename detected. Deleting oldest $excessCount files... --"
+  log "-- $checkpointCount checkpoint files for ${baseAppName} on source node $nodename detected. Deleting oldest $excessCount files... --"
   
   # Delete the oldest files to keep only 5 (more efficient approach)
   filesToDelete=$(ls -1t $checkpointDir | tail -n $excessCount)
@@ -825,7 +1038,7 @@ if [ "$checkpointCount" -gt 5 ]; then
   finalCount=$(ls $checkpointDir 2>/dev/null | wc -l)
   log "-- Cleanup complete. ${baseAppName} now has $finalCount checkpoint files --"
 else
-  log "-- $checkpointCount checkpoint files for ${baseAppName} on $nodename detected (within limit) --"
+  log "-- $checkpointCount checkpoint files for ${baseAppName} on source node $nodename detected (within limit) --"
 fi
 
 log "------------------------------------------------------------------"

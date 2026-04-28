@@ -23,6 +23,7 @@ class ManualMigrationRequest(BaseModel):
     namespace: str
     podName: str
     appName: str
+    registryAddress: str | None = None
     forensicAnalysis: bool = False
     AISuggestion: bool = False
     disableIstioSidecar: bool = False
@@ -91,15 +92,200 @@ def _full_log_lines(log_path: str):
 
     return lines
 
+_LOG_LINE_TS = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s+(.*)$"
+)
+
+
+def _parse_log_timestamp_message(line: str):
+    raw = (line or "").strip()
+    if not raw:
+        return None, ""
+    m = _LOG_LINE_TS.match(raw)
+    if not m:
+        return None, raw
+    ts_s, msg = m.group(1), m.group(2)
+    try:
+        ts_norm = ts_s.replace("Z", "+00:00")
+        return datetime.fromisoformat(ts_norm), msg
+    except ValueError:
+        return None, raw
+
+
+def _duration_ms_between_markers(log_lines, start_markers: tuple, end_markers: tuple):
+    """First timestamped line matching any start_markers, then first subsequent line matching any end_markers."""
+    start_ts = None
+    start_idx = None
+    for i, line in enumerate(log_lines):
+        ts, msg = _parse_log_timestamp_message(line)
+        if ts is None:
+            continue
+        if any(m in msg for m in start_markers):
+            start_ts, start_idx = ts, i
+            break
+    if start_ts is None or start_idx is None:
+        return None
+    for line in log_lines[start_idx + 1 :]:
+        ts, msg = _parse_log_timestamp_message(line)
+        if ts is None:
+            continue
+        if any(m in msg for m in end_markers):
+            return int((ts - start_ts).total_seconds() * 1000)
+    return None
+
+
+def _pipeline_check_duration_ms(log_lines):
+    start_idx = None
+    start_ts = None
+    for i, line in enumerate(log_lines):
+        ts, msg = _parse_log_timestamp_message(line)
+        if ts is None:
+            continue
+        if any(
+            m in msg
+            for m in ("Destination cluster checks started", "Global preflight checks started")
+        ):
+            if start_idx is None or i < start_idx:
+                start_idx, start_ts = i, ts
+    if start_ts is None or start_idx is None:
+        return None
+    for line in log_lines[start_idx + 1 :]:
+        ts, msg = _parse_log_timestamp_message(line)
+        if ts is None:
+            continue
+        if any(
+            m in msg
+            for m in ("Global preflight checks completed", "Destination cluster checks completed")
+        ):
+            return int((ts - start_ts).total_seconds() * 1000)
+    return None
+
+
+def _downtime_ms_from_log(log_lines):
+    """
+    Time from source workload stop (post-checkpoint) until restore pod reports running.
+    Requires ISO8601-prefixed log lines from single-migration.sh.
+    """
+    start_idx = None
+    start_ts = None
+    for i, line in enumerate(log_lines):
+        ts, msg = _parse_log_timestamp_message(line)
+        if ts is None:
+            continue
+        if "--- Stopping source workload" in msg:
+            start_idx, start_ts = i, ts
+            break
+    if start_ts is None:
+        for i, line in enumerate(log_lines):
+            ts, msg = _parse_log_timestamp_message(line)
+            if ts is None:
+                continue
+            if "-- Scaled deployment" in msg and "0 replicas" in msg:
+                start_idx, start_ts = i, ts
+                break
+    if start_ts is None or start_idx is None:
+        return None
+    for line in log_lines[start_idx + 1 :]:
+        ts, msg = _parse_log_timestamp_message(line)
+        if ts is None:
+            continue
+        if " is running --" in msg:
+            return int((ts - start_ts).total_seconds() * 1000)
+    return None
+
+
+def _attach_stage_durations_ms(stages: list, log_lines: list):
+    computers = {
+        "pipeline_check": _pipeline_check_duration_ms,
+        "dest_prep": lambda lines: _duration_ms_between_markers(
+            lines,
+            ("-- Destination preparation (pre-checkpoint) started",),
+            ("-- Destination preparation (pre-checkpoint) completed",),
+        ),
+        "checkpoint": lambda lines: _duration_ms_between_markers(
+            lines,
+            ("-- Creating checkpoint for",),
+            (
+                "-- Checkpoint created --",
+                "-- Latest checkpoint found:",
+                "-- Permissions changed --",
+            ),
+        ),
+        "source_stop_post_checkpoint": lambda lines: _duration_ms_between_markers(
+            lines,
+            (
+                "-- Post-checkpoint: stop source workload",
+                "--- Stopping source workload",
+            ),
+            ("-- Convert checkpoint into image",),
+        ),
+        "image": lambda lines: _duration_ms_between_markers(
+            lines,
+            ("-- Convert checkpoint into image",),
+            ("-- Image pushed onto local registy", "-- Image pushed onto local registry"),
+        ),
+        "checkpoint_prepull": lambda lines: _duration_ms_between_markers(
+            lines,
+            ("-- Pre-pull step (checkpoint image) started",),
+            (
+                "-- Pre-pull step (checkpoint image) completed",
+                "-- Pre-pull step (checkpoint image) skipped by feature flag",
+            ),
+        ),
+        "restore": lambda lines: _duration_ms_between_markers(
+            lines,
+            ("-- Applying restore yaml file", '-- Waiting for the new pod'),
+            (" is running --",),
+        ),
+        "traffic": lambda lines: _duration_ms_between_markers(
+            lines,
+            (
+                "switching mirroring rule",
+                "Switching traffic to the new pod",
+                "-- No Istio VirtualService patch for this workload",
+            ),
+            ("-- Traffic switch step completed --", "Traffic switch skipped (restore pod not running)"),
+        ),
+        "cleanup": lambda lines: _duration_ms_between_markers(
+            lines,
+            ("-- Traffic switch step completed --", "Traffic switch skipped (restore pod not running)"),
+            ("-- Source workload cleanup completed --",),
+        ),
+    }
+    for st in stages:
+        key = st.get("key")
+        if key not in computers:
+            continue
+        ms = computers[key](log_lines)
+        if ms is not None:
+            st["duration_ms"] = ms
+
+
 def _build_stage_statuses(log_lines, final_status: str):
+    # Order matches single-migration.sh: checks → dest prep → checkpoint → **stop source on source**
+    # (replicas 0 / delete) → image → optional checkpoint pre-pull → restore → traffic → finalize script.
     stages = [
         {"key": "pipeline_check", "label": "Pipeline checks", "status": "pending"},
+        {
+            "key": "dest_prep",
+            "label": "Destination prep (pre-checkpoint)",
+            "status": "pending",
+        },
         {"key": "checkpoint", "label": "Checkpoint creation", "status": "pending"},
+        {
+            "key": "source_stop_post_checkpoint",
+            "label": "Source scaled down (post-checkpoint)",
+            "status": "pending",
+        },
         {"key": "image", "label": "Image conversion and push", "status": "pending"},
-        {"key": "prepull", "label": "Base image pre-pull", "status": "pending"},
+        {
+            "key": "checkpoint_prepull",
+            "label": "Checkpoint image pre-pull (optional)",
+            "status": "pending",
+        },
         {"key": "restore", "label": "Restore pod startup", "status": "pending"},
         {"key": "traffic", "label": "Traffic switch", "status": "pending"},
-        {"key": "cleanup", "label": "Source cleanup", "status": "pending"},
+        {"key": "cleanup", "label": "Migration finalize", "status": "pending"},
     ]
 
     joined = "\n".join(log_lines)
@@ -111,41 +297,74 @@ def _build_stage_statuses(log_lines, final_status: str):
     if "Global preflight checks completed" in joined or "Destination cluster checks completed" in joined:
         stages[0]["status"] = "completed"
 
-    if "Creating checkpoint" in joined:
+    if "Destination preparation (pre-checkpoint) started" in joined:
         stages[1]["status"] = "running"
-    if "-- Checkpoint created --" in joined:
+    if "Destination preparation (pre-checkpoint) completed" in joined:
         stages[1]["status"] = "completed"
 
-    if "Convert checkpoint into image" in joined or "Pushing image" in joined:
+    if "Creating checkpoint" in joined:
         stages[2]["status"] = "running"
-    if "Image pushed onto local registy" in joined or "Image pushed onto local registry" in joined:
+    if (
+        "-- Checkpoint created --" in joined
+        or "-- Latest checkpoint found:" in joined
+        or "-- Permissions changed --" in joined
+    ):
         stages[2]["status"] = "completed"
 
-    if "Pre-pull step (base image) started" in joined or "Pre-pulling image" in joined:
-        stages[3]["status"] = "running"
-    if (
-        "Pre-pull step (base image) completed" in joined
-        or "Pre-pull daemonset cleanup complete" in joined
-        or "Pre-pull step (checkpoint image) completed" in joined
-        or "Pre-pull step (checkpoint image) skipped by design" in joined
-        or "Pre-pull step (checkpoint image) skipped by feature flag" in joined
+    # First source stop (after durable checkpoint) happens before image build — not "final cleanup".
+    if "-- Post-checkpoint: stop source workload" in joined or (
+        "--- Stopping source workload" in joined and "Convert checkpoint into image" not in joined
     ):
+        stages[3]["status"] = "running"
+    if "Convert checkpoint into image" in joined or "Pushing image" in joined:
         stages[3]["status"] = "completed"
 
-    if "Waiting for the new pod" in joined:
+    if "Convert checkpoint into image" in joined or "Pushing image" in joined:
         stages[4]["status"] = "running"
-    if " is running --" in joined:
+    if "Image pushed onto local registy" in joined or "Image pushed onto local registry" in joined:
         stages[4]["status"] = "completed"
 
-    if "switching mirroring rule" in joined or "Switching traffic to the new pod" in joined:
+    if "Pre-pull step (checkpoint image) started" in joined:
         stages[5]["status"] = "running"
-    if "--- Deleting old pod ---" in joined or "-- Migration complete --" in joined:
+    if (
+        "Pre-pull step (checkpoint image) completed" in joined
+        or "Pre-pull step (checkpoint image) skipped by feature flag" in joined
+    ):
         stages[5]["status"] = "completed"
 
-    if "--- Deleting old pod ---" in joined:
+    if "Applying restore yaml file" in joined or "Waiting for the new pod" in joined:
         stages[6]["status"] = "running"
-    if "Old pod" in joined and "deleted" in joined:
+    if " is running --" in joined:
         stages[6]["status"] = "completed"
+
+    if "-- Traffic switch step completed --" in joined:
+        stages[7]["status"] = "completed"
+    elif "Traffic switch skipped (restore pod not running)" in joined:
+        stages[7]["status"] = "completed"
+    elif "switching mirroring rule" in joined or "Switching traffic to the new pod" in joined:
+        stages[7]["status"] = "running"
+
+    traffic_done = (
+        "-- Traffic switch step completed --" in joined
+        or "Traffic switch skipped (restore pod not running)" in joined
+    )
+    if traffic_done and "-- Source workload cleanup completed --" not in joined:
+        stages[8]["status"] = "running"
+    if "-- Source workload cleanup completed --" in joined:
+        stages[8]["status"] = "completed"
+
+    # Older migration logs (checkpoint before destination prep) lack dest_prep markers.
+    if (
+        final_status == "completed"
+        and stages[1]["status"] == "pending"
+        and "Destination preparation (pre-checkpoint)" not in joined
+        and (
+            "-- Checkpoint created --" in joined
+            or "-- Latest checkpoint found:" in joined
+            or "-- Post-checkpoint: stop source workload" in joined
+        )
+    ):
+        stages[1]["status"] = "completed"
 
     if final_status == "error":
         for stage in reversed(stages):
@@ -158,7 +377,10 @@ def _build_stage_statuses(log_lines, final_status: str):
                     stage["status"] = "failed"
                     break
 
-    return stages
+    downtime_ms = _downtime_ms_from_log(log_lines)
+    _attach_stage_durations_ms(stages, log_lines)
+
+    return {"stage_statuses": stages, "downtime_ms": downtime_ms}
 
 def _extract_log_metadata(log_path: str):
     metadata = {
@@ -174,17 +396,17 @@ def _extract_log_metadata(log_path: str):
     with open(migration_log_file, "r") as file:
         content = file.read()
 
-    source_match = re.search(r"^Source cluster:\s*(.+)$", content, re.MULTILINE)
-    target_match = re.search(r"^Target cluster:\s*(.+)$", content, re.MULTILINE)
-    namespace_match = re.search(r"^Namespace:\s*(.+)$", content, re.MULTILINE)
-    target_pod_match = re.search(r'Waiting for the new pod "([^"]+)" to be ready', content)
+    # Lines may be prefixed with UTC timestamps from log(); strip via shared parser.
+    for line in content.splitlines():
+        _, msg = _parse_log_timestamp_message(line)
+        if msg.startswith("Source cluster:"):
+            metadata["source_cluster"] = msg.split(":", 1)[1].strip()
+        elif msg.startswith("Target cluster:"):
+            metadata["target_cluster"] = msg.split(":", 1)[1].strip()
+        elif msg.startswith("Namespace:"):
+            metadata["namespace"] = msg.split(":", 1)[1].strip()
 
-    if source_match:
-        metadata["source_cluster"] = source_match.group(1).strip()
-    if target_match:
-        metadata["target_cluster"] = target_match.group(1).strip()
-    if namespace_match:
-        metadata["namespace"] = namespace_match.group(1).strip()
+    target_pod_match = re.search(r'Waiting for the new pod "([^"]+)" to be ready', content)
     if target_pod_match:
         metadata["target_pod_name"] = target_pod_match.group(1).strip()
 
@@ -264,7 +486,7 @@ def _collect_recent_migrations(limit: int, offset: int):
             else:
                 pod_name = log_dir
             metadata = _extract_log_metadata(log_path)
-            stage_statuses = _build_stage_statuses(full_log_lines, status)
+            built = _build_stage_statuses(full_log_lines, status)
 
             entries.append({
                 "pod_name": pod_name,
@@ -278,7 +500,8 @@ def _collect_recent_migrations(limit: int, offset: int):
                 "log_path": log_path,
                 "log_lines": full_log_lines,
                 "return_code": return_code,
-                "stage_statuses": stage_statuses,
+                "stage_statuses": built["stage_statuses"],
+                "downtime_ms": built.get("downtime_ms"),
                 "created_at": datetime.fromtimestamp(created_ts, tz=timezone).isoformat()
             })
 
@@ -356,6 +579,8 @@ async def run_migration_script(info: MigrationInfo, log_path: str):
             cmd.extend(["--dest-cluster", info.target_cluster])
         if info.namespace:
             cmd.extend(["--namespace", info.namespace])
+        if info.registry_address:
+            cmd.extend(["--registry", info.registry_address])
         if info.forensic_analysis:
             cmd.append("--forensic-analysis")
         if info.AI_suggestion:
@@ -417,6 +642,7 @@ async def migrate_pod(body: ManualMigrationRequest):
         source_cluster=body.sourceCluster,
         target_cluster=body.targetCluster,
         namespace=body.namespace,
+        registry_address=(body.registryAddress or "").strip() or None,
         forensic_analysis=body.forensicAnalysis,
         AI_suggestion=body.AISuggestion,
         disable_istio_sidecar=body.disableIstioSidecar,
@@ -425,7 +651,7 @@ async def migrate_pod(body: ManualMigrationRequest):
     return await trigger_migration(info)
 
 @router.get("/migration-status/{pod_name}")
-async def get_migration_status(pod_name: str):
+def get_migration_status(pod_name: str):
     """Get the status of a migration by checking the log files"""
     try:
         # Find the most recent migration log for this pod
@@ -456,7 +682,7 @@ async def get_migration_status(pod_name: str):
                 content = f.read()
             return_code = _extract_return_code(content)
             if return_code == 0:
-                stage_statuses = _build_stage_statuses(full_log_lines, "completed")
+                built = _build_stage_statuses(full_log_lines, "completed")
                 return {
                     "status": "completed",
                     "log_path": latest_log_path,
@@ -464,11 +690,12 @@ async def get_migration_status(pod_name: str):
                     "return_code": return_code,
                     "recent_log_lines": _recent_log_lines(latest_log_path),
                     "log_lines": full_log_lines,
-                    "stage_statuses": stage_statuses,
+                    "stage_statuses": built["stage_statuses"],
+                    "downtime_ms": built.get("downtime_ms"),
                     **runtime_details,
                     **metadata
                 }
-            stage_statuses = _build_stage_statuses(full_log_lines, "error")
+            built = _build_stage_statuses(full_log_lines, "error")
             return {
                 "status": "error",
                 "log_path": latest_log_path,
@@ -476,34 +703,37 @@ async def get_migration_status(pod_name: str):
                 "return_code": return_code,
                 "recent_log_lines": _recent_log_lines(latest_log_path),
                 "log_lines": full_log_lines,
-                "stage_statuses": stage_statuses,
+                "stage_statuses": built["stage_statuses"],
+                "downtime_ms": built.get("downtime_ms"),
                 **runtime_details,
                 **metadata
             }
         elif os.path.exists(error_file):
             with open(error_file, 'r') as f:
                 content = f.read()
-            stage_statuses = _build_stage_statuses(full_log_lines, "error")
+            built = _build_stage_statuses(full_log_lines, "error")
             return {
                 "status": "error",
                 "log_path": latest_log_path,
                 "error": content,
                 "recent_log_lines": _recent_log_lines(latest_log_path),
                 "log_lines": full_log_lines,
-                "stage_statuses": stage_statuses,
+                "stage_statuses": built["stage_statuses"],
+                "downtime_ms": built.get("downtime_ms"),
                 **runtime_details,
                 **metadata
             }
         else:
             progress = _latest_progress_line(latest_log_path)
-            stage_statuses = _build_stage_statuses(full_log_lines, "running")
+            built = _build_stage_statuses(full_log_lines, "running")
             return {
                 "status": "running",
                 "log_path": latest_log_path,
                 "message": progress or "Migration is still in progress",
                 "recent_log_lines": _recent_log_lines(latest_log_path),
                 "log_lines": full_log_lines,
-                "stage_statuses": stage_statuses,
+                "stage_statuses": built["stage_statuses"],
+                "downtime_ms": built.get("downtime_ms"),
                 **runtime_details,
                 **metadata
             }
@@ -512,7 +742,7 @@ async def get_migration_status(pod_name: str):
         return {"status": "error", "message": f"Error checking migration status: {str(e)}"}
 
 @router.get("/migration-history")
-async def get_migration_history(limit: int = 10, offset: int = 0):
+def get_migration_history(limit: int = 10, offset: int = 0):
     try:
         if limit < 1:
             limit = 1

@@ -72,4 +72,60 @@ export class K8sService {
     });
   }
 
+  clearRoutingDemoFault(cluster: string): Observable<{
+    cluster: string;
+    removed: boolean;
+    message: string;
+  }> {
+    const url = `${this.apiUrl}/k8s/routing-demo/clear-fault`;
+    return this.http.post<{ cluster: string; removed: boolean; message: string }>(url, { cluster });
+  }
+
+  scaleRoutingDemo(cluster: string, replicas = 1): Observable<{
+    cluster: string;
+    deployment: string;
+    namespace: string;
+    replicas: number;
+    message: string;
+  }> {
+    const url = `${this.apiUrl}/k8s/routing-demo/scale`;
+    return this.http.post<{ cluster: string; deployment: string; namespace: string; replicas: number; message: string }>(url, {
+      cluster,
+      replicas
+    });
+  }
+
+  runHttpProbe(url: string, connectTimeoutS = 2, maxTimeS = 10): Observable<{
+    timestamp: string;
+    url: string;
+    http_code: number;
+    total_s: number;
+    total_ms: number;
+    ok: boolean;
+    stdout: string;
+    stdout_json?: Record<string, unknown> | null;
+    counter?: number | null;
+    stderr: string;
+    exit_code: number;
+  }> {
+    const endpoint = `${this.apiUrl}/k8s/http-probe`;
+    return this.http.post<{
+      timestamp: string;
+      url: string;
+      http_code: number;
+      total_s: number;
+      total_ms: number;
+      ok: boolean;
+      stdout: string;
+      stdout_json?: Record<string, unknown> | null;
+      counter?: number | null;
+      stderr: string;
+      exit_code: number;
+    }>(endpoint, {
+      url,
+      connect_timeout_s: connectTimeoutS,
+      max_time_s: maxTimeS
+    });
+  }
+
 }

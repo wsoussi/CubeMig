@@ -26,6 +26,7 @@ import { ToastModule } from 'primeng/toast';
 import { ProgressSpinnerModule } from 'primeng/progressspinner';
 import { MessagesModule } from 'primeng/messages';
 import { MessageModule } from 'primeng/message';
+import { TooltipModule } from 'primeng/tooltip';
 import { FormsModule } from '@angular/forms';
 import { MessageService } from 'primeng/api';
 import { MarkdownModule } from 'ngx-markdown';
@@ -60,6 +61,7 @@ import { MarkdownModule } from 'ngx-markdown';
     ProgressSpinnerModule,
     MessagesModule,
     MessageModule,
+    TooltipModule,
     // Markdown module for rendering markdown content
     MarkdownModule.forRoot()
   ],

@@ -2,6 +2,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app_routes import logs, k8s, migration, config, simulation, tee_encapsulation
 import logging
+import urllib3
+
+# Kubeconfig may use insecure-skip-tls-verify for some clusters (e.g. self-signed API without
+# embedded CA). urllib3 would log InsecureRequestWarning on every API call; disable that noise.
+# For proper TLS like other contexts, remove insecure-skip-tls-verify and set certificate-authority-data.
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
 

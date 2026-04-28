@@ -29,15 +29,20 @@ class K8sClient:
             )
 
     def get_client(self, target_cluster: str):
+        # Keep contexts in sync with kubeconfig changes without requiring backend restart.
+        self._refresh_clients()
         client_for_cluster = self.clients.get(target_cluster)
         if not client_for_cluster:
             raise ValueError(f"Invalid cluster choice: {target_cluster}")
         return client_for_cluster
 
     def list_clusters(self):
+        # Refresh before listing so newly added contexts appear in the UI.
+        self._refresh_clients()
         return sorted(self.clients.keys())
 
     def has_cluster(self, cluster_name: str):
+        self._refresh_clients()
         return cluster_name in self.clients
 
 k8s_client = K8sClient('/home/ubuntu/.kube/config')

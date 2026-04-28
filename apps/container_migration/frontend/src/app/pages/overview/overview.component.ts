@@ -34,6 +34,7 @@ export class OverviewComponent implements OnInit, OnDestroy{
       { label: 'Cluster 1', value: 'cluster1' },
       { label: 'Cluster 2', value: 'cluster2' },
       { label: 'Cluster SEV-SNP', value: 'cluster-sev-snp' },
+      { label: 'Cluster PNET', value: 'cluster-pnet' },
     ]
     this.clusterListRight = this.clusterListLeft
     this.selectedClusterLeft = 'cluster1'
