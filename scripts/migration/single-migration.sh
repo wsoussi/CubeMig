@@ -14,7 +14,9 @@ preflightClusterChecks="${PREFLIGHT_CLUSTER_CHECKS:-true}"
 sourceCluster=""
 destCluster=""
 namespace="default"
-cluster1Registry="${CLUSTER1_REGISTRY:-160.85.255.146:5000}"
+# Host:port of the registry where checkpoint images are pushed (typically the migration/Podman host, not a K8s node).
+# MIGRATION_REGISTRY wins; CLUSTER1_REGISTRY is still read for backward compatibility with older .env files.
+migrationRegistry="${MIGRATION_REGISTRY:-${CLUSTER1_REGISTRY:-160.85.255.146:5000}}"
 PNET_WIREGUARD_MIGRATION_REGISTRY="${PNET_WIREGUARD_MIGRATION_REGISTRY:-10.10.10.1:5000}"
 
 # Parse command-line options
@@ -23,7 +25,7 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         -fa|--forensic-analysis) forensicAnalysis=true ;;
         -ai|--ai-suggestion) AISuggestion=true ;;
-        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] --"; echo "-- Env: PRE_CHECKPOINT_ISTIO_503=true|false (default true): inject HTTP 503 on routing-demo VS before checkpoint; cleared when switching to v2. --"; exit 0 ;;
+        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] --"; echo "-- Env: MIGRATION_REGISTRY=<host:port> (default 160.85.255.146:5000; CLUSTER1_REGISTRY still accepted). PRE_CHECKPOINT_ISTIO_503=true|false (default true): inject HTTP 503 on routing-demo VS before checkpoint; cleared when switching to v2. --"; exit 0 ;;
         --log-dir) 
             shift
             custom_log_dir=$1
@@ -43,7 +45,7 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         --registry)
             shift
-            cluster1Registry=$1
+            migrationRegistry=$1
             ;;
         --disable-istio-sidecar)
             disableIstioSidecar=true
@@ -127,7 +129,7 @@ handle_error() {
     
     # Get registry image information
     log "Registry image check:"
-    curl -s "http://$cluster1Registry/v2/$checkpoint_image_name/tags/list" >> "$log_file" 2>&1 || log "Failed to get registry image info"
+    curl -s "http://$migrationRegistry/v2/$checkpoint_image_name/tags/list" >> "$log_file" 2>&1 || log "Failed to get registry image info"
   fi
   
   exit 1
@@ -201,6 +203,7 @@ sanitize_k8s_name() {
 # Slow/flaky API paths (e.g. single-node cluster-sev-snp): TLS timeouts during long migrations.
 # --validate=false avoids OpenAPI schema fetch (common failure: "failed to download openapi").
 KUBECTL_DEST_TIMEOUT="${KUBECTL_DEST_TIMEOUT:-120s}"
+KUBECTL_PROXY_PORT="${KUBECTL_PROXY_PORT:-8001}"
 
 kubectl_apply_dest() {
   local manifest="$1"
@@ -559,13 +562,13 @@ log "Source cluster: $currentCluster"
 log "Target cluster: $destCluster"
 destClusterNormalized="$(echo "$destCluster" | tr '[:upper:]' '[:lower:]')"
 if [[ "$destClusterNormalized" == "cluster-pnet" || "$destClusterNormalized" == "pnet" ]]; then
-  cluster1Registry="$PNET_WIREGUARD_MIGRATION_REGISTRY"
+  migrationRegistry="$PNET_WIREGUARD_MIGRATION_REGISTRY"
   enableCheckpointPrepull=true
-  log "-- PNET destination detected: overriding migration image registry to $cluster1Registry (WireGuard route) --"
+  log "-- PNET destination detected: overriding migration image registry to $migrationRegistry (WireGuard route) --"
   log "-- PNET destination detected: forcing checkpoint image pre-pull --"
 fi
 log "Namespace: $namespace"
-log "Destination registry: $cluster1Registry"
+log "Destination registry: $migrationRegistry"
 log "Disable Istio sidecar: $disableIstioSidecar"
 log "Enable checkpoint pre-pull: $enableCheckpointPrepull"
 log "Preflight destination setup: $preflightDestinationSetup"
@@ -694,11 +697,47 @@ log "-- Creating checkpoint for $podName on $nodename --"
 checkpoint_epoch_before_curl=$(($(date +%s) - 3))
 startTime=$(date +%s%3N)
 _checkpoint_body_tmp=$(mktemp)
-checkpoint_http=$(curl -sk -X POST "https://$nodename:10250/checkpoint/${namespace}/${podName}/${containerName}" \
-  --key /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.key \
-  --cacert /home/ubuntu/.kube/pki/$currentCluster-ca.crt \
-  --cert /home/ubuntu/.kube/pki/$currentCluster-apiserver-kubelet-client.crt \
-  -o "$_checkpoint_body_tmp" -w '%{http_code}') || { rm -f "$_checkpoint_body_tmp"; handle_error "Failed to invoke kubelet checkpoint API (curl error)"; }
+proxy_port="$KUBECTL_PROXY_PORT"
+proxy_healthz_url="http://127.0.0.1:${proxy_port}/healthz"
+proxy_checkpoint_path="/api/v1/nodes/${nodename}/proxy/checkpoint/${namespace}/${podName}/${containerName}"
+proxy_checkpoint_url="http://127.0.0.1:${proxy_port}${proxy_checkpoint_path}"
+KUBECTL_PROXY_PID=""
+started_kubectl_proxy=false
+
+if curl -sS --connect-timeout 2 --max-time 5 "$proxy_healthz_url" >/dev/null 2>&1; then
+  log "-- Reusing existing kubectl proxy on 127.0.0.1:${proxy_port} --"
+else
+  log "-- kubectl proxy on 127.0.0.1:${proxy_port} is not reachable; starting new proxy for source context ${sourceCluster} --"
+  kubectl --context "$sourceCluster" proxy --address=127.0.0.1 --port="$proxy_port" >>"$log_file" 2>&1 &
+  KUBECTL_PROXY_PID=$!
+  started_kubectl_proxy=true
+  sleep 1
+  if ! curl -sS --connect-timeout 2 --max-time 5 "$proxy_healthz_url" >/dev/null 2>&1; then
+    log "-- kubectl proxy did not become reachable on 127.0.0.1:${proxy_port} --"
+    if [[ "$started_kubectl_proxy" == true && -n "$KUBECTL_PROXY_PID" ]] && kill -0 "$KUBECTL_PROXY_PID" 2>/dev/null; then
+      kill "$KUBECTL_PROXY_PID" 2>/dev/null || true
+      wait "$KUBECTL_PROXY_PID" 2>/dev/null || true
+    fi
+    handle_error "Failed to start kubectl proxy on 127.0.0.1:${proxy_port} for source context ${sourceCluster}"
+  fi
+fi
+
+log "-- Calling checkpoint API via apiserver proxy path: ${proxy_checkpoint_path} --"
+checkpoint_http=$(curl -sS -X POST "$proxy_checkpoint_url" \
+  --connect-timeout 10 \
+  --max-time 300 \
+  -o "$_checkpoint_body_tmp" \
+  -w '%{http_code}' \
+  2>>"$log_file")
+curl_rc=$?
+if [[ "$started_kubectl_proxy" == true && -n "$KUBECTL_PROXY_PID" ]] && kill -0 "$KUBECTL_PROXY_PID" 2>/dev/null; then
+  kill "$KUBECTL_PROXY_PID" 2>/dev/null || true
+  wait "$KUBECTL_PROXY_PID" 2>/dev/null || true
+fi
+if [[ "$curl_rc" -ne 0 ]]; then
+  rm -f "$_checkpoint_body_tmp"
+  handle_error "Failed to invoke kubelet checkpoint API via apiserver proxy (curl rc=$curl_rc)"
+fi
 checkpoint_output=$(cat "$_checkpoint_body_tmp")
 rm -f "$_checkpoint_body_tmp"
 checkpointTime=$(($(date +%s%3N) - $startTime))
@@ -811,7 +850,7 @@ newImageTime=$(($(date +%s%3N) - $startTime))
 checkpoint_image_name=$(image="$source_image_ref" && image=${image##*/} && image=${image%%:*} && echo "$image") || handle_error "Failed to get image name"
 checkpoint_image_tag="checkpoint-$(date +%Y%m%d%H%M%S)-${RANDOM}"
 local_checkpoint_image_ref="${checkpoint_image_name}:${checkpoint_image_tag}"
-registry_checkpoint_image_ref="${cluster1Registry}/${checkpoint_image_name}:${checkpoint_image_tag}"
+registry_checkpoint_image_ref="${migrationRegistry}/${checkpoint_image_name}:${checkpoint_image_tag}"
 
 log "Checkpoint image name: $checkpoint_image_name"
 log "Checkpoint image tag: $checkpoint_image_tag"
