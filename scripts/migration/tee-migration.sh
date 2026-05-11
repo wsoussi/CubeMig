@@ -2,7 +2,7 @@
 
 # This script is used to migrate a podman container running in sous@bert.cloudlab.zhaw.ch to an SEV-SNP VM
 
-# Usage: ./tee-migration.sh <container_name> <src_vm_name> <dest_vm_name>
+# Usage: ./tee-migration.sh <container_name> <src_vm_name> <dest_vm_name> [cpu-cap-mode]
 
 # Check if the container name and the source VM name and destination VM name are provided
 # Check if the container name is provided
@@ -17,7 +17,7 @@ if [ -z "$2" ]; then
 fi
 # Check if the destination VM name is provided
 if [ -z "$3" ]; then
-    echo "Usage: $0 <container_name> <src_vm_name> <dest_vm_name>"
+    echo "Usage: $0 <container_name> <src_vm_name> <dest_vm_name> [cpu-cap-mode]"
     exit 1
 fi
 
@@ -27,6 +27,8 @@ CONTAINER_NAME="$1"
 SRC_VM_NAME="$2"
 # Set the destination VM name
 DEST_VM_NAME="$3"
+# CRIU cpu capability mode: safe default to "cpu", configurable with arg 4 or CRIU_CPU_CAP
+CRIU_CPU_CAP_MODE="${4:-${CRIU_CPU_CAP:-cpu}}"
 # Set the SSH key to access both VMs
 SSH_KEY="~/.ssh/id_rsa"
 
@@ -54,6 +56,26 @@ fi
 # define the checkpoint name
 CHECKPOINT_NAME="$CONTAINER_NAME-checkpoint.tar.gz"
 
+validate_criu_cpu_cap_mode() {
+    case "$1" in
+        cpu|fpu|ins|all|none|cpu,fpu|cpu,ins|fpu,ins|cpu,fpu,ins)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+if ! validate_criu_cpu_cap_mode "$CRIU_CPU_CAP_MODE"; then
+    echo "Error: Unsupported CRIU cpu-cap mode '$CRIU_CPU_CAP_MODE'. Allowed: cpu, fpu, ins, cpu,fpu, cpu,ins, fpu,ins, cpu,fpu,ins, all, none."
+    exit 1
+fi
+if [[ "$CRIU_CPU_CAP_MODE" == "none" ]]; then
+    echo "Error: CRIU cpu-cap mode 'none' is unsafe and not allowed by default. Use cpu or all (or another strict mode)."
+    exit 1
+fi
+
 
 ####### DO THE MIGRATION #######
 
@@ -67,7 +89,7 @@ else
 fi
 
 # make a checkpoint of the container
-if ! ssh $SRC_VM_ACCESS "sudo podman container checkpoint $CONTAINER_NAME --tcp-established --file-locks -e ~/podman_checkpoints/$CONTAINER_NAME-checkpoint.tar.gz"; then
+if ! ssh $SRC_VM_ACCESS "sudo podman container checkpoint $CONTAINER_NAME --tcp-established --file-locks --cpu-cap=$CRIU_CPU_CAP_MODE -e ~/podman_checkpoints/$CONTAINER_NAME-checkpoint.tar.gz"; then
     echo "Failed to checkpoint the container $CONTAINER_NAME"
     exit 1
 else
@@ -90,8 +112,20 @@ else
     echo "Checkpoint $CHECKPOINT_NAME copied to the destination VM $DEST_VM_NAME"
 fi
 
+# validate destination CPU compatibility before restore
+if ! ssh $DEST_VM_ACCESS "set -e; tmp_dir=\$(mktemp -d); trap 'rm -rf \"\$tmp_dir\"' EXIT; tar -xzf ~/podman_checkpoints/$CHECKPOINT_NAME -C \"\$tmp_dir\"; cpuinfo_path=\$(find \"\$tmp_dir\" -type f -name cpuinfo.img | head -n 1); if [ -z \"\$cpuinfo_path\" ]; then echo \"ERROR: cpuinfo.img not found in checkpoint archive\" >&2; exit 2; fi; images_dir=\$(dirname \"\$cpuinfo_path\"); criu cpuinfo check -D \"\$images_dir\" --cpu-cap \"$CRIU_CPU_CAP_MODE\""; then
+    echo "CPU capability check failed: target CPU is missing required CPU/instruction-set features."
+    echo "source node: $SRC_VM_NAME"
+    echo "target node: $DEST_VM_NAME"
+    echo "checkpoint image: ~/podman_checkpoints/$CHECKPOINT_NAME"
+    echo "cpu-cap mode: $CRIU_CPU_CAP_MODE"
+    exit 1
+else
+    echo "CPU capability check passed for checkpoint $CHECKPOINT_NAME (mode: $CRIU_CPU_CAP_MODE)"
+fi
+
 # restore the container in the destination VM
-if ! ssh $DEST_VM_ACCESS "sudo podman container restore --tcp-established --file-locks --import ~/podman_checkpoints/$CHECKPOINT_NAME"; then
+if ! ssh $DEST_VM_ACCESS "sudo podman container restore --tcp-established --file-locks --cpu-cap=$CRIU_CPU_CAP_MODE --import ~/podman_checkpoints/$CHECKPOINT_NAME"; then
     echo "Failed to restore the container $CONTAINER_NAME in the destination VM $DEST_VM_NAME"
 else
     echo "Container $CONTAINER_NAME restored successfully in the destination VM $DEST_VM_NAME"

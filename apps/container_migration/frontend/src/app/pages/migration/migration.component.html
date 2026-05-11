@@ -34,6 +34,19 @@
                     <p-inputSwitch [(ngModel)]="disableIstioSidecar" class="mr-5 ml-3"></p-inputSwitch>
                     <p>Disable Istio sidecar</p>
                 </div>
+                <div class="grid formgrid mb-3 mt-5">
+                    <p-inputSwitch [(ngModel)]="skipCpuCompatCheck" class="mr-5 ml-3"></p-inputSwitch>
+                    <p pTooltip="Skip the post-checkpoint CRIU CPU compatibility validator pod (cpuinfo.img vs target CPU). Only enable when source and destination CPUs are known compatible." tooltipPosition="top">Skip CRIU CPU compatibility check</p>
+                </div>
+                <div class="grid formgrid mb-3 mt-5">
+                    <p-inputSwitch [(ngModel)]="cleanupIncompatibleMounts" class="mr-5 ml-3" (onChange)="onCleanupIncompatibleMountsChange()"></p-inputSwitch>
+                    <p pTooltip="Before checkpoint, run a daemonset on every source-cluster node that unmounts container mounts (e.g. /sys/devices/virtual/powercap) which the destination (PNET / SEV-SNP) cannot provide. Auto-defaults to ON for PNET / SEV-SNP destinations." tooltipPosition="top">
+                        Cleanup incompatible mounts before checkpoint
+                        @if (isHeterogeneousTarget(selectedTarget) && !cleanupIncompatibleMountsTouched) {
+                            <small class="ml-2 text-color-secondary">(default for {{ selectedTarget }})</small>
+                        }
+                    </p>
+                </div>
                 <div class="flex flex-wrap gap-2" style="display: flex; justify-content: flex-end;">
                     <button pButton label="Reset" (click)="reset()" class="p-button-outlined p-button-secondary"></button>
                     <button pButton label="Migrate" (click)="migratePod()" [loading]="loading"></button>
@@ -58,6 +71,7 @@
                         <button pButton type="button" label="Toggle v1 ↔ v2" class="p-button-secondary" (click)="toggleRoutingDemoTraffic()" [loading]="trafficToggleLoading" [disabled]="trafficToggleLoading || faultClearLoading || !trafficSwitchCluster || !canToggleRoutingDemoTraffic()"></button>
                         <button pButton type="button" label="Clear fault (503)" class="p-button-outlined" (click)="clearRoutingDemoFault()" [loading]="faultClearLoading" [disabled]="faultClearLoading || trafficToggleLoading || !trafficSwitchCluster || !routingDemoTrafficSubsetAvailable" pTooltip="Removes Istio fault.abort from VirtualService routing-demo (e.g. after a failed migration)" tooltipPosition="top"></button>
                         <button pButton type="button" label="Scale routing-demo to replicas=1" class="p-button-outlined p-button-help" (click)="scaleRoutingDemoToOne()" [loading]="replicaScaleLoading" [disabled]="replicaScaleLoading || trafficToggleLoading || faultClearLoading || !trafficSwitchCluster"></button>
+                        <button pButton type="button" label="Scale routing-demo to replicas=0" class="p-button-outlined p-button-danger" (click)="scaleRoutingDemoToZero()" [loading]="replicaScaleLoading" [disabled]="replicaScaleLoading || trafficToggleLoading || faultClearLoading || !trafficSwitchCluster"></button>
                     </div>
                 </div>
             } @else {

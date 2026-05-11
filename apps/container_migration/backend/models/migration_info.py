@@ -14,4 +14,6 @@ class MigrationInfo(BaseModel):
      forensic_analysis: Optional[bool] = None
      AI_suggestion: Optional[bool] = None
      disable_istio_sidecar: Optional[bool] = None
+     skip_cpu_compat_check: Optional[bool] = None
+     cleanup_incompatible_mounts: Optional[bool] = None
      timestamp: Optional[str] = None

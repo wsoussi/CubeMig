@@ -6,9 +6,12 @@
 forensicAnalysis=false
 AISuggestion=false
 disableIstioSidecar=false
+skipCpuCompatCheck="${SKIP_CPU_COMPAT_CHECK:-false}"
+cleanupIncompatibleMounts="${CLEANUP_INCOMPATIBLE_MOUNTS:-false}"
 enableCheckpointPrepull="${ENABLE_CHECKPOINT_PREPULL:-false}"
 preflightDestinationSetup="${PREFLIGHT_DESTINATION_SETUP:-true}"
 preflightClusterChecks="${PREFLIGHT_CLUSTER_CHECKS:-true}"
+criuCpuCapMode="${CRIU_CPU_CAP:-cpu}"
 
 # Cluster parameters must be provided explicitly
 sourceCluster=""
@@ -25,7 +28,7 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         -fa|--forensic-analysis) forensicAnalysis=true ;;
         -ai|--ai-suggestion) AISuggestion=true ;;
-        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] --"; echo "-- Env: MIGRATION_REGISTRY=<host:port> (default 160.85.255.146:5000; CLUSTER1_REGISTRY still accepted). PRE_CHECKPOINT_ISTIO_503=true|false (default true): inject HTTP 503 on routing-demo VS before checkpoint; cleared when switching to v2. --"; exit 0 ;;
+        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] [--skip-cpu-compat-check] [--cleanup-incompatible-mounts] [--cpu-cap <cpu|fpu|ins|cpu,ins|all>] --"; echo "-- Env: MIGRATION_REGISTRY=<host:port> (default 160.85.255.146:5000; CLUSTER1_REGISTRY still accepted). PRE_CHECKPOINT_ISTIO_503=true|false (default true): inject HTTP 503 on routing-demo VS before checkpoint; cleared when switching to v2. CRIU_CPU_CAP=<mode> defaults to cpu. SKIP_CPU_COMPAT_CHECK=true|false skips the CRIU CPU compatibility validator pod. CLEANUP_INCOMPATIBLE_MOUNTS=true|false runs a daemonset that unmounts /sys/devices/virtual/powercap on every source-cluster node before the checkpoint (use for heterogeneous PNET / SEV-SNP destinations). --"; exit 0 ;;
         --log-dir) 
             shift
             custom_log_dir=$1
@@ -50,6 +53,16 @@ while [[ "$#" -gt 0 ]]; do
         --disable-istio-sidecar)
             disableIstioSidecar=true
             ;;
+        --skip-cpu-compat-check)
+            skipCpuCompatCheck=true
+            ;;
+        --cleanup-incompatible-mounts)
+            cleanupIncompatibleMounts=true
+            ;;
+        --cpu-cap)
+            shift
+            criuCpuCapMode=$1
+            ;;
         *) 
             if [[ -z "$podName" ]]; then
                 podName=$1
@@ -60,7 +73,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 if [ -z "$podName" ]; then
-    echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] --"
+    echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] [--skip-cpu-compat-check] [--cleanup-incompatible-mounts] [--cpu-cap <cpu|fpu|ins|cpu,ins|all>] --"
     exit 1
 fi
 
@@ -85,6 +98,8 @@ fi
 
 insecure_registry_setup_attempted=false
 criu_tcp_close_setup_attempted=false
+criu_cpu_cap_setup_attempted=false
+incompatible_mounts_cleanup_done=false
 source_workload_stopped=false
 istio_pre_checkpoint_503_applied=false
 
@@ -161,6 +176,18 @@ else
   preflightClusterChecks=false
 fi
 
+if [[ "$skipCpuCompatCheck" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss])$ ]]; then
+  skipCpuCompatCheck=true
+else
+  skipCpuCompatCheck=false
+fi
+
+if [[ "$cleanupIncompatibleMounts" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss])$ ]]; then
+  cleanupIncompatibleMounts=true
+else
+  cleanupIncompatibleMounts=false
+fi
+
 preCheckpointIstio503="${PRE_CHECKPOINT_ISTIO_503:-true}"
 if [[ "$preCheckpointIstio503" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss])$ ]]; then
   preCheckpointIstio503=true
@@ -220,6 +247,55 @@ kubectl_apply_dest() {
   handle_error "Failed to $err_context"
 }
 
+# Print every Ready=True node that is NOT cordoned (spec.unschedulable!=true) for the given context.
+# The DaemonSet controller adds default tolerations for node.kubernetes.io/unschedulable and
+# node.kubernetes.io/not-ready, so DS pods would otherwise land on cordoned / not-ready nodes.
+# We restrict scheduling via nodeAffinity on kubernetes.io/hostname instead.
+list_ready_schedulable_nodes() {
+  local context="$1"
+  kubectl --context "$context" get nodes \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.unschedulable}{"\t"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' \
+    2>/dev/null \
+    | awk -F'\t' '$2 != "true" && $3 == "True" {print $1}'
+}
+
+# Inject a kubernetes.io/hostname In (...) nodeAffinity into a DaemonSet/Pod manifest so it does
+# not get scheduled on NotReady or SchedulingDisabled nodes. Falls back to the original manifest
+# if node discovery returns nothing (fail-open).
+render_manifest_for_ready_nodes() {
+  local context="$1"
+  local input_manifest="$2"
+  local output_manifest="$3"
+  local helper="${SCRIPT_DIR}/../utils/setup/render_daemonset_node_affinity.py"
+  local ready_nodes_csv ready_node_count
+
+  if [[ ! -f "$helper" ]]; then
+    log "-- Warning: nodeAffinity helper not found at $helper; applying manifest as-is --"
+    cp "$input_manifest" "$output_manifest"
+    return 0
+  fi
+
+  local -a ready_nodes=()
+  while IFS= read -r n; do
+    [[ -n "$n" ]] && ready_nodes+=("$n")
+  done < <(list_ready_schedulable_nodes "$context")
+  ready_node_count="${#ready_nodes[@]}"
+
+  if [[ "$ready_node_count" -eq 0 ]]; then
+    log "-- Warning: Could not detect any Ready+schedulable nodes on context $context; applying manifest without nodeAffinity restriction --"
+    cp "$input_manifest" "$output_manifest"
+    return 0
+  fi
+
+  ready_nodes_csv=$(IFS=','; echo "${ready_nodes[*]}")
+  log "-- Restricting daemonset scheduling on $context to Ready+schedulable nodes ($ready_node_count): $ready_nodes_csv --"
+
+  if ! python3 "$helper" "$input_manifest" "$output_manifest" "${ready_nodes[@]}" >> "$log_file" 2>&1; then
+    log "-- Warning: nodeAffinity helper failed; applying manifest as-is --"
+    cp "$input_manifest" "$output_manifest"
+  fi
+}
+
 kubectl_delete_dest_best_effort() {
   local manifest="$1"
   local label="$2"
@@ -262,6 +338,10 @@ prepull_image_on_destination() {
       -e "s/__IMAGE_REF__/${escaped_image_ref}/g" \
       "$template" > "$ds_manifest" || handle_error "Failed to generate pre-pull daemonset manifest"
 
+  local ds_manifest_ready="${ds_manifest%.yaml}.ready-nodes.yaml"
+  render_manifest_for_ready_nodes "$destCluster" "$ds_manifest" "$ds_manifest_ready"
+  ds_manifest="$ds_manifest_ready"
+
   log "-- Pre-pulling image \"$image_ref\" on destination cluster using daemonset \"$ds_name\" --"
   kubectl_apply_dest "$ds_manifest" "apply pre-pull daemonset"
 
@@ -301,7 +381,9 @@ ensure_insecure_registry_on_destination() {
 
   insecure_registry_setup_attempted=true
   log "-- Applying on-demand insecure-registry daemonset (destination cluster) --"
-  kubectl_apply_dest "$setup_manifest" "apply insecure-registry daemonset"
+  local rendered_manifest="${log_dir}/insecure-registry-daemonset.ready-nodes.yaml"
+  render_manifest_for_ready_nodes "$destCluster" "$setup_manifest" "$rendered_manifest"
+  kubectl_apply_dest "$rendered_manifest" "apply insecure-registry daemonset"
 
   # Give daemonset time to write config/restart CRI-O where needed.
   sleep 20
@@ -309,7 +391,7 @@ ensure_insecure_registry_on_destination() {
   kubectl -n kube-system logs -l app=setup-insecure-registry --tail=50 >> "$log_file" 2>&1 || true
 
   # The setup is only needed on demand; do not keep it running permanently.
-  kubectl_delete_dest_best_effort "$setup_manifest" "insecure-registry daemonset"
+  kubectl_delete_dest_best_effort "$rendered_manifest" "insecure-registry daemonset"
   log "-- On-demand insecure-registry setup completed and cleaned up --"
 }
 
@@ -327,14 +409,143 @@ ensure_criu_tcp_close_on_destination() {
 
   criu_tcp_close_setup_attempted=true
   log "-- Applying preflight CRIU tcp-close daemonset (destination cluster) --"
-  kubectl_apply_dest "$setup_manifest" "apply CRIU tcp-close daemonset"
+  local rendered_manifest="${log_dir}/criu-tcp-close-daemonset.ready-nodes.yaml"
+  render_manifest_for_ready_nodes "$destCluster" "$setup_manifest" "$rendered_manifest"
+  kubectl_apply_dest "$rendered_manifest" "apply CRIU tcp-close daemonset"
 
   sleep 10
   kubectl -n kube-system get pods -l app=setup-criu-tcp-close -o wide >> "$log_file" 2>&1 || true
   kubectl -n kube-system logs -l app=setup-criu-tcp-close --tail=50 >> "$log_file" 2>&1 || true
 
-  kubectl_delete_dest_best_effort "$setup_manifest" "criu-tcp-close daemonset"
+  kubectl_delete_dest_best_effort "$rendered_manifest" "criu-tcp-close daemonset"
   log "-- Preflight CRIU tcp-close setup completed and cleaned up --"
+}
+
+# Configure / remove cpu-cap in /etc/criu/runc.conf on every node of the active cluster context.
+# enabled=true  -> enforce exactly one "cpu-cap <mode>" line.
+# enabled=false -> remove all cpu-cap lines (and legacy CubeMig marker comments).
+ensure_criu_cpu_cap_on_active_context() {
+  local cpu_cap_mode="$1"
+  local enabled="$2"
+  local context_label="$3"
+  local template="${SCRIPT_DIR}/../utils/setup/criu-cpu-cap-daemonset.yaml"
+  local manifest="${log_dir}/criu-cpu-cap-${context_label}.yaml"
+
+  if [[ "$criu_cpu_cap_setup_attempted" == "$context_label" ]]; then
+    log "-- CRIU cpu-cap setup already applied for $context_label; skipping --"
+    return 0
+  fi
+
+  if [[ ! -f "$template" ]]; then
+    handle_error "CRIU cpu-cap setup manifest not found: $template"
+  fi
+
+  sed -e "s|__CPU_CAP_MODE__|${cpu_cap_mode}|g" \
+      -e "s|__CPU_CAP_ENABLED__|${enabled}|g" \
+      "$template" > "$manifest" \
+    || handle_error "Failed to render CRIU cpu-cap daemonset manifest for $context_label"
+
+  # The active context here is always the cluster receiving the daemonset (set by callers).
+  local active_context
+  active_context=$(kubectl config current-context 2>/dev/null || echo "")
+  local rendered_manifest="${manifest%.yaml}.ready-nodes.yaml"
+  if [[ -n "$active_context" ]]; then
+    render_manifest_for_ready_nodes "$active_context" "$manifest" "$rendered_manifest"
+  else
+    cp "$manifest" "$rendered_manifest"
+  fi
+
+  if [[ "$enabled" == "true" ]]; then
+    log "-- Applying CRIU cpu-cap daemonset (cluster: $context_label, mode: $cpu_cap_mode) --"
+  else
+    log "-- Applying CRIU cpu-cap cleanup daemonset (cluster: $context_label; removing cpu-cap from /etc/criu/runc.conf) --"
+  fi
+  if ! kubectl apply --request-timeout="$KUBECTL_DEST_TIMEOUT" --validate=false -f "$rendered_manifest" >> "$log_file" 2>&1; then
+    handle_error "Failed to apply CRIU cpu-cap daemonset on cluster $context_label"
+  fi
+
+  sleep 10
+  kubectl -n kube-system get pods -l app=setup-criu-cpu-cap -o wide >> "$log_file" 2>&1 || true
+  kubectl -n kube-system logs -l app=setup-criu-cpu-cap --tail=50 >> "$log_file" 2>&1 || true
+
+  kubectl delete --request-timeout="$KUBECTL_DEST_TIMEOUT" -f "$rendered_manifest" --ignore-not-found=true >> "$log_file" 2>&1 || true
+  criu_cpu_cap_setup_attempted="$context_label"
+  if [[ "$enabled" == "true" ]]; then
+    log "-- CRIU cpu-cap setup completed on cluster $context_label (mode: $cpu_cap_mode) --"
+  else
+    log "-- CRIU cpu-cap cleanup completed on cluster $context_label (cpu-cap removed) --"
+  fi
+}
+
+# Run a daemonset on every Ready+schedulable node of the source cluster that, for the named pod,
+# unmounts /sys/devices/virtual/powercap from the running container's mount namespace. CRIU restore
+# fails on PNET / SEV-SNP destinations because those nodes do not expose the powercap path the
+# checkpoint expects to bind-mount back in. Removing the mount before the checkpoint makes the
+# restore succeed on heterogeneous targets.
+cleanup_incompatible_mounts_on_source() {
+  local target_pod_name="$1"
+  local target_namespace="$2"
+  local template="${SCRIPT_DIR}/../utils/setup/cleanup-incompatible-mounts-daemonset.yaml"
+  local ds_name manifest rendered_manifest run_id wait_total wait_max
+  local pod_count fail_count
+
+  if [[ ! -f "$template" ]]; then
+    log "-- Warning: cleanup-incompatible-mounts daemonset template not found at $template; skipping --"
+    return 0
+  fi
+
+  if [[ "$incompatible_mounts_cleanup_done" == true ]]; then
+    log "-- cleanup-incompatible-mounts already executed in this run; skipping --"
+    return 0
+  fi
+
+  run_id=$(date +%s)-$RANDOM
+  ds_name="cleanup-incompatible-mounts-${run_id}"
+  ds_name="${ds_name:0:63}"
+  manifest="${log_dir}/${ds_name}.yaml"
+  rendered_manifest="${log_dir}/${ds_name}.ready-nodes.yaml"
+
+  sed -e "s|__DS_NAME__|${ds_name}|g" \
+      -e "s|__TARGET_POD_NAME__|${target_pod_name}|g" \
+      -e "s|__TARGET_NAMESPACE__|${target_namespace}|g" \
+      "$template" > "$manifest" \
+    || handle_error "Failed to render cleanup-incompatible-mounts daemonset manifest"
+
+  kubectl config use-context "$sourceCluster" >> "$log_file" 2>&1 \
+    || handle_error "Failed to switch context to $sourceCluster for incompatible mount cleanup"
+  kubectl config set-context --current --namespace="$namespace" >> "$log_file" 2>&1 || true
+  render_manifest_for_ready_nodes "$sourceCluster" "$manifest" "$rendered_manifest"
+
+  log "-- Applying cleanup-incompatible-mounts daemonset on source cluster $sourceCluster (pod: $target_namespace/$target_pod_name, ds: $ds_name) --"
+  if ! kubectl apply --request-timeout="$KUBECTL_DEST_TIMEOUT" --validate=false -f "$rendered_manifest" >> "$log_file" 2>&1; then
+    log "-- Warning: failed to apply cleanup-incompatible-mounts daemonset; continuing without cleanup --"
+    return 0
+  fi
+
+  # Wait for the daemonset to roll out across the targeted nodes; abort if cleanup containers report errors.
+  wait_total=0
+  wait_max="${CLEANUP_INCOMPATIBLE_MOUNTS_TIMEOUT:-90}"
+  while (( wait_total < wait_max )); do
+    pod_count=$(kubectl -n kube-system get pods -l "app=${ds_name}" -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null | grep -c "Running\|Succeeded\|Failed" || true)
+    if [[ "$pod_count" =~ ^[0-9]+$ ]] && (( pod_count > 0 )); then
+      break
+    fi
+    sleep 3
+    wait_total=$((wait_total + 3))
+  done
+
+  # Surface logs for visibility before tearing the DS down.
+  kubectl -n kube-system get pods -l "app=${ds_name}" -o wide >> "$log_file" 2>&1 || true
+  kubectl -n kube-system logs -l "app=${ds_name}" --tail=100 --prefix=true >> "$log_file" 2>&1 || true
+
+  fail_count=$(kubectl -n kube-system logs -l "app=${ds_name}" --tail=200 2>/dev/null | grep -c "\[ERROR\] powercap mount still present" || true)
+  if [[ "$fail_count" =~ ^[0-9]+$ ]] && (( fail_count > 0 )); then
+    log "-- Warning: cleanup-incompatible-mounts reported $fail_count container(s) where powercap could not be unmounted --"
+  fi
+
+  kubectl delete --request-timeout="$KUBECTL_DEST_TIMEOUT" -f "$rendered_manifest" --ignore-not-found=true >> "$log_file" 2>&1 || true
+  incompatible_mounts_cleanup_done=true
+  log "-- cleanup-incompatible-mounts daemonset finished and removed --"
 }
 
 run_destination_cluster_checks() {
@@ -431,6 +642,142 @@ rewrite_registry_for_pnet_destination() {
       ;;
   esac
 }
+
+validate_criu_cpu_cap_mode() {
+  case "$1" in
+    cpu|fpu|ins|all|none|cpu,fpu|cpu,ins|fpu,ins|cpu,fpu,ins)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+run_criu_cpu_compat_check() {
+  local checkpoint_archive="$1"
+  local cpu_cap_mode="$2"
+  local source_node="$3"
+  local target_cluster="$4"
+  local extract_dir
+  local cpuinfo_path
+  local images_dir
+  local validator_pod_template="${SCRIPT_DIR}/../utils/setup/criu-cpu-validator-pod.yaml"
+  local run_id pod_name configmap_name validator_manifest
+  local prev_context phase exit_code logs target_node
+  local saved_context
+
+  if [[ ! -f "$validator_pod_template" ]]; then
+    handle_error "CRIU CPU validator pod template not found: $validator_pod_template"
+  fi
+
+  extract_dir=$(mktemp -d) || handle_error "Failed to create temporary directory for CRIU CPU check"
+  if ! sudo tar -xf "$checkpoint_archive" -C "$extract_dir" >>"$log_file" 2>&1; then
+    sudo rm -rf "$extract_dir" || true
+    handle_error "Failed to extract checkpoint archive for CPU compatibility validation (source node: $source_node, target cluster: $target_cluster, checkpoint: $checkpoint_archive, cpu-cap mode: $cpu_cap_mode)"
+  fi
+
+  cpuinfo_path=$(sudo find "$extract_dir" -type f -name "cpuinfo.img" 2>/dev/null | head -n 1)
+  if [[ -z "$cpuinfo_path" ]]; then
+    sudo rm -rf "$extract_dir" || true
+    handle_error "Checkpoint archive does not contain CRIU cpuinfo image; cannot validate target CPU compatibility before restore. CRIU dump must run with --cpu-cap (set 'cpu-cap <mode>' in /etc/criu/runc.conf on source nodes — see criu-cpu-cap-daemonset.yaml). source node: $source_node, target cluster: $target_cluster, checkpoint: $checkpoint_archive, cpu-cap mode: $cpu_cap_mode"
+  fi
+  images_dir=$(dirname "$cpuinfo_path")
+
+  # Extracted CRIU images are root-owned with restrictive perms; make file readable AND
+  # parent dirs traversable so 'kubectl create configmap --from-file=...' (running as the
+  # invoking user) can stat and read the cpuinfo.img.
+  sudo chmod -R a+rX "$extract_dir" || true
+
+  run_id=$(date +%s)-$RANDOM
+  pod_name="criu-cpu-check-${run_id}"
+  pod_name="${pod_name:0:63}"
+  configmap_name="${pod_name}-cpuinfo"
+  validator_manifest="${log_dir}/${pod_name}.yaml"
+
+  saved_context=$(kubectl config current-context 2>/dev/null || true)
+  kubectl config use-context "$target_cluster" >>"$log_file" 2>&1 \
+    || handle_error "Failed to switch context to $target_cluster for CPU compatibility validation"
+
+  log "-- Running pre-restore CRIU CPU compatibility check on destination cluster $target_cluster (mode: $cpu_cap_mode) --"
+
+  if ! kubectl -n kube-system create configmap "$configmap_name" --from-file=cpuinfo.img="$cpuinfo_path" >>"$log_file" 2>&1; then
+    [[ -n "$saved_context" ]] && kubectl config use-context "$saved_context" >>"$log_file" 2>&1 || true
+    sudo rm -rf "$extract_dir" || true
+    handle_error "Failed to create cpuinfo ConfigMap on destination cluster (source node: $source_node, target cluster: $target_cluster, checkpoint: $checkpoint_archive, cpu-cap mode: $cpu_cap_mode)"
+  fi
+
+  sed -e "s|__POD_NAME__|${pod_name}|g" \
+      -e "s|__CONFIGMAP_NAME__|${configmap_name}|g" \
+      -e "s|__CPU_CAP_MODE__|${cpu_cap_mode}|g" \
+      -e "s|__RUN_ID__|${run_id}|g" \
+      "$validator_pod_template" > "$validator_manifest" \
+    || { kubectl -n kube-system delete configmap "$configmap_name" --ignore-not-found=true >>"$log_file" 2>&1 || true
+         [[ -n "$saved_context" ]] && kubectl config use-context "$saved_context" >>"$log_file" 2>&1 || true
+         sudo rm -rf "$extract_dir" || true
+         handle_error "Failed to render CRIU CPU validator pod manifest"; }
+
+  if ! kubectl apply --request-timeout="$KUBECTL_DEST_TIMEOUT" --validate=false -f "$validator_manifest" >>"$log_file" 2>&1; then
+    kubectl -n kube-system delete pod "$pod_name" --ignore-not-found=true >>"$log_file" 2>&1 || true
+    kubectl -n kube-system delete configmap "$configmap_name" --ignore-not-found=true >>"$log_file" 2>&1 || true
+    [[ -n "$saved_context" ]] && kubectl config use-context "$saved_context" >>"$log_file" 2>&1 || true
+    sudo rm -rf "$extract_dir" || true
+    handle_error "Failed to apply CRIU CPU validator pod on destination cluster (source node: $source_node, target cluster: $target_cluster, checkpoint: $checkpoint_archive, cpu-cap mode: $cpu_cap_mode)"
+  fi
+
+  local wait_total=0
+  local wait_max="${CRIU_CPU_CHECK_TIMEOUT:-180}"
+  phase=""
+  while (( wait_total < wait_max )); do
+    phase=$(kubectl -n kube-system get pod "$pod_name" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+    if [[ "$phase" == "Succeeded" || "$phase" == "Failed" ]]; then
+      break
+    fi
+    sleep 3
+    wait_total=$((wait_total + 3))
+  done
+
+  target_node=$(kubectl -n kube-system get pod "$pod_name" -o jsonpath='{.spec.nodeName}' 2>/dev/null || echo "unknown")
+  exit_code=$(kubectl -n kube-system get pod "$pod_name" -o jsonpath='{.status.containerStatuses[?(@.name=="check")].state.terminated.exitCode}' 2>/dev/null || echo "")
+  logs=$(kubectl -n kube-system logs "$pod_name" --all-containers=true --tail=200 2>/dev/null || true)
+
+  log "-- CRIU CPU validator pod \"$pod_name\" landed on destination node: $target_node --"
+  if [[ -n "$logs" ]]; then
+    log "-- CRIU CPU validator logs (begin) --"
+    printf '%s\n' "$logs" >> "$log_file"
+    log "-- CRIU CPU validator logs (end) --"
+  fi
+
+  kubectl -n kube-system delete pod "$pod_name" --ignore-not-found=true >>"$log_file" 2>&1 || true
+  kubectl -n kube-system delete configmap "$configmap_name" --ignore-not-found=true >>"$log_file" 2>&1 || true
+  [[ -n "$saved_context" ]] && kubectl config use-context "$saved_context" >>"$log_file" 2>&1 || true
+  sudo rm -rf "$extract_dir" || true
+
+  if [[ "$phase" != "Succeeded" && "$phase" != "Failed" ]]; then
+    handle_error "Timed out waiting for CRIU CPU validator pod (timeout=${wait_max}s). source node: $source_node, target cluster: $target_cluster, target node: $target_node, checkpoint: $checkpoint_archive, cpu-cap mode: $cpu_cap_mode"
+  fi
+
+  if [[ -z "$exit_code" ]]; then
+    handle_error "CRIU CPU validator pod did not produce a terminated exit code (phase=$phase). source node: $source_node, target cluster: $target_cluster, target node: $target_node, checkpoint: $checkpoint_archive, cpu-cap mode: $cpu_cap_mode"
+  fi
+
+  if [[ "$exit_code" != "0" ]]; then
+    handle_error "Target CPU is incompatible with checkpoint CPU requirements (missing CPU/instruction-set features). source node: $source_node, target cluster: $target_cluster, target node: $target_node, checkpoint: $checkpoint_archive, cpu-cap mode: $cpu_cap_mode, validator exit code: $exit_code"
+  fi
+
+  log "-- CRIU CPU compatibility check passed (source node: $source_node → target node: $target_node, mode: $cpu_cap_mode) --"
+}
+
+if [[ "$skipCpuCompatCheck" != true ]]; then
+  if ! validate_criu_cpu_cap_mode "$criuCpuCapMode"; then
+    handle_error "Unsupported CRIU cpu-cap mode: $criuCpuCapMode (allowed: cpu, fpu, ins, cpu,fpu, cpu,ins, fpu,ins, cpu,fpu,ins, all, none)"
+  fi
+  if [[ "$criuCpuCapMode" == "none" ]]; then
+    handle_error "CRIU cpu-cap mode 'none' is unsafe and not allowed by default. Use cpu or all (or another strict mode)."
+  fi
+else
+  log "-- skip-cpu-compat-check=true: skipping CRIU cpu-cap mode validation and cpuinfo compatibility enforcement --"
+fi
 
 # Basic/cold: no requests on source after durable checkpoint .tar is on NFS — call after chmod, before buildah.
 stop_source_workload_after_checkpoint() {
@@ -574,6 +921,9 @@ log "Enable checkpoint pre-pull: $enableCheckpointPrepull"
 log "Preflight destination setup: $preflightDestinationSetup"
 log "Preflight cluster checks: $preflightClusterChecks"
 log "Pre-checkpoint Istio 503 (routing-demo): $preCheckpointIstio503"
+log "CRIU cpu-cap mode: $criuCpuCapMode"
+log "Skip CRIU CPU compatibility check: $skipCpuCompatCheck"
+log "Cleanup incompatible mounts before checkpoint: $cleanupIncompatibleMounts"
 
 log "Forensic analysis: $forensicAnalysis"
 log "AI suggestion: $AISuggestion"
@@ -666,6 +1016,13 @@ kubectl config use-context "$sourceCluster" || handle_error "Failed to switch co
 kubectl config set-context --current --namespace="$namespace"
 currentCluster="$sourceCluster"
 
+# Ensure CRIU on source nodes writes cpuinfo.img during dump (so target compatibility can be validated before restore).
+if [[ "$skipCpuCompatCheck" == true ]]; then
+  ensure_criu_cpu_cap_on_active_context "$criuCpuCapMode" "false" "source"
+else
+  ensure_criu_cpu_cap_on_active_context "$criuCpuCapMode" "true" "source"
+fi
+
 # NFS mirror: each node's kubelet checkpoint dir is exported as <CHECKPOINT_NFS_ROOT>/<nodeName>/.
 checkpoint_nfs_root="${CHECKPOINT_NFS_ROOT:-/home/ubuntu/nfs/checkpoints}"
 nodename=$(kubectl get pods "$podName" -o jsonpath='{.spec.nodeName}') || handle_error "Failed to get node name (before checkpoint; after dest prep)"
@@ -690,6 +1047,12 @@ if [[ "$preCheckpointIstio503" == true && "$namespace" == "istio-enabled" && "$t
   else
     log "-- Pre-checkpoint 503 skipped: VirtualService routing-demo not found --"
   fi
+fi
+
+if [[ "$cleanupIncompatibleMounts" == true ]]; then
+  cleanup_incompatible_mounts_on_source "$podName" "$namespace"
+else
+  log "-- cleanup-incompatible-mounts skipped by feature flag (--cleanup-incompatible-mounts) --"
 fi
 
 log "-- Creating checkpoint for $podName on $nodename --"
@@ -819,6 +1182,17 @@ log "-- Latest checkpoint found: $checkpointfile --"
 
 log "------------------------------------------------------------------"
 
+# Belt-and-braces: also enforce cpu-cap during runc-driven CRIU restore on destination nodes.
+if [[ "$skipCpuCompatCheck" == true ]]; then
+  kubectl config use-context "$destCluster" >>"$log_file" 2>&1 || handle_error "Failed to switch context to $destCluster for cpu-cap cleanup"
+  ensure_criu_cpu_cap_on_active_context "$criuCpuCapMode" "false" "destination"
+  kubectl config use-context "$sourceCluster" >>"$log_file" 2>&1 || handle_error "Failed to switch context back to $sourceCluster after cpu-cap cleanup"
+else
+  kubectl config use-context "$destCluster" >>"$log_file" 2>&1 || handle_error "Failed to switch context to $destCluster for cpu-cap setup"
+  ensure_criu_cpu_cap_on_active_context "$criuCpuCapMode" "true" "destination"
+  kubectl config use-context "$sourceCluster" >>"$log_file" 2>&1 || handle_error "Failed to switch context back to $sourceCluster after cpu-cap setup"
+fi
+
 log "-- Changing permissions for checkpoint file --"
 
 startTime=$(date +%s%3N)
@@ -826,6 +1200,11 @@ sudo chmod a+rwx "$checkpointfile" || handle_error "Failed to change permissions
 permissionTime=$(($(date +%s%3N) - $startTime))
 
 log "-- Permissions changed --"
+if [[ "$skipCpuCompatCheck" == true ]]; then
+  log "-- CRIU CPU compatibility check skipped by feature flag (--skip-cpu-compat-check) --"
+else
+  run_criu_cpu_compat_check "$checkpointfile" "$criuCpuCapMode" "$nodename" "$destCluster"
+fi
 
 log "------------------------------------------------------------------"
 
@@ -844,6 +1223,11 @@ log "Checkpoint file: $checkpointfile"
 newcontainer=$(buildah from --tls-verify=false "$source_image_ref") || handle_error "Failed to create new container"
 buildah add $newcontainer $checkpointfile / || handle_error "Failed to add checkpoint file to container"
 buildah config --annotation=io.kubernetes.cri-o.annotations.checkpoint.name=${containerName} $newcontainer || handle_error "Failed to add checkpoint annotation to container"
+if [[ "$skipCpuCompatCheck" == true ]]; then
+  log "-- Skipping CRIU checkpoint.options cpu-cap annotation because --skip-cpu-compat-check is enabled --"
+else
+  buildah config --annotation=io.kubernetes.cri-o.annotations.checkpoint.options=--cpu-cap=${criuCpuCapMode} $newcontainer || handle_error "Failed to add CRIU cpu-cap restore annotation to container"
+fi
 buildah config --annotation=io.container.manager=crio $newcontainer || handle_error "Failed to add crio annotation to container"
 newImageTime=$(($(date +%s%3N) - $startTime))
 

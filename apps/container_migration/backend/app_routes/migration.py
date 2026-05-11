@@ -27,6 +27,8 @@ class ManualMigrationRequest(BaseModel):
     forensicAnalysis: bool = False
     AISuggestion: bool = False
     disableIstioSidecar: bool = False
+    skipCpuCompatCheck: bool = False
+    cleanupIncompatibleMounts: bool = False
 
 def _validate_cluster_pair(source_cluster: str, target_cluster: str):
     if not source_cluster or not target_cluster:
@@ -587,6 +589,10 @@ async def run_migration_script(info: MigrationInfo, log_path: str):
             cmd.append("--ai-suggestion")
         if info.disable_istio_sidecar:
             cmd.append("--disable-istio-sidecar")
+        if info.skip_cpu_compat_check:
+            cmd.append("--skip-cpu-compat-check")
+        if info.cleanup_incompatible_mounts:
+            cmd.append("--cleanup-incompatible-mounts")
     
         # Run the subprocess asynchronously
         process = await asyncio.create_subprocess_exec(
@@ -646,6 +652,8 @@ async def migrate_pod(body: ManualMigrationRequest):
         forensic_analysis=body.forensicAnalysis,
         AI_suggestion=body.AISuggestion,
         disable_istio_sidecar=body.disableIstioSidecar,
+        skip_cpu_compat_check=body.skipCpuCompatCheck,
+        cleanup_incompatible_mounts=body.cleanupIncompatibleMounts,
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )
     return await trigger_migration(info)

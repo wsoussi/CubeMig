@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: __POD_NAME__
+  namespace: kube-system
+  labels:
+    app: criu-cpu-validator
+    cubemig-run-id: "__RUN_ID__"
+spec:
+  restartPolicy: Never
+  hostPID: true
+  tolerations:
+    - operator: Exists
+  initContainers:
+    - name: stage-cpuinfo
+      image: alpine:3.20
+      securityContext:
+        privileged: true
+      env:
+        - name: RUN_ID
+          value: "__RUN_ID__"
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          STAGE_DIR="/host/tmp/cubemig-criu-cpu-validate-${RUN_ID}"
+          rm -rf "${STAGE_DIR}"
+          mkdir -p "${STAGE_DIR}"
+          cp /cpuinfo/cpuinfo.img "${STAGE_DIR}/cpuinfo.img"
+      volumeMounts:
+        - name: host
+          mountPath: /host
+        - name: cpuinfo
+          mountPath: /cpuinfo
+  containers:
+    - name: check
+      image: alpine:3.20
+      securityContext:
+        privileged: true
+      env:
+        - name: RUN_ID
+          value: "__RUN_ID__"
+        - name: CPU_CAP_MODE
+          value: "__CPU_CAP_MODE__"
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -u
+          STAGE_DIR_HOST="/tmp/cubemig-criu-cpu-validate-${RUN_ID}"
+          STAGE_DIR_VIEW="/host${STAGE_DIR_HOST}"
+
+          echo "==== CRIU CPU compatibility check (CubeMig) ===="
+          echo "Run ID:        ${RUN_ID}"
+          echo "cpu-cap mode:  ${CPU_CAP_MODE}"
+          echo "Stage dir:     ${STAGE_DIR_HOST} (host)"
+          echo "Target node:   $(cat /etc/hostname 2>/dev/null || echo unknown)"
+
+          if ! chroot /host /bin/sh -c "command -v criu" >/dev/null 2>&1; then
+            echo "ERROR: criu binary not available on host (PATH inside chroot)." >&2
+            rm -rf "${STAGE_DIR_VIEW}" || true
+            exit 2
+          fi
+
+          echo "---- criu --version (target node) ----"
+          chroot /host /bin/sh -c "criu --version" || true
+
+          echo "---- target /proc/cpuinfo flags (first cpu) ----"
+          awk '/^flags/ {print; exit}' /proc/cpuinfo || true
+
+          echo "---- ls -la stage dir ----"
+          ls -la "${STAGE_DIR_VIEW}" || true
+
+          # NOTE: 'criu cpuinfo check' does NOT accept --cpu-cap (subcommand-level option).
+          # The cpu-cap mode is baked into cpuinfo.img at dump time via runc.conf (cpu-cap <mode>),
+          # so at check time we just compare cpuinfo.img against the local /proc/cpuinfo.
+          CRIU_LOG_HOST="${STAGE_DIR_HOST}/criu-cpu-check.log"
+          CRIU_LOG_VIEW="${STAGE_DIR_VIEW}/criu-cpu-check.log"
+          CMD="criu cpuinfo check -D ${STAGE_DIR_HOST} -v4 -o ${CRIU_LOG_HOST}"
+          echo "---- Running (target node, recorded mode: ${CPU_CAP_MODE}): ${CMD} ----"
+
+          rc=0
+          chroot /host /bin/sh -c "${CMD}" 2>&1 || rc=$?
+
+          echo "---- criu cpuinfo check log (begin) ----"
+          cat "${CRIU_LOG_VIEW}" 2>/dev/null || echo "(no criu log file produced)"
+          echo "---- criu cpuinfo check log (end) ----"
+
+          if [ "${rc}" -eq 0 ]; then
+            echo "---- RESULT: PASS (criu cpuinfo check exited 0; target CPU is compatible) ----"
+          else
+            echo "---- RESULT: FAIL (criu cpuinfo check exited ${rc}; target CPU is NOT compatible) ----"
+          fi
+
+          rm -rf "${STAGE_DIR_VIEW}" || true
+          exit $rc
+      volumeMounts:
+        - name: host
+          mountPath: /host
+  volumes:
+    - name: host
+      hostPath:
+        path: /
+    - name: cpuinfo
+      configMap:
+        name: __CONFIGMAP_NAME__

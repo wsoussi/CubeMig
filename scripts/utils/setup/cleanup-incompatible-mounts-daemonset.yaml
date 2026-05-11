@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: __DS_NAME__
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: __DS_NAME__
+  template:
+    metadata:
+      labels:
+        app: __DS_NAME__
+    spec:
+      hostPID: true
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: cleanup
+          image: alpine:3.20
+          securityContext:
+            privileged: true
+          env:
+            - name: TARGET_POD_NAME
+              value: "__TARGET_POD_NAME__"
+            - name: TARGET_NAMESPACE
+              value: "__TARGET_NAMESPACE__"
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -u
+              echo "[INFO] cleanup-incompatible-mounts on node ${NODE_NAME}"
+              echo "[INFO] Looking for containers of pod ${TARGET_NAMESPACE}/${TARGET_POD_NAME}"
+
+              # Run crictl + nsenter from the host PID namespace (chroot via nsenter -t 1).
+              # Each line of crictl output that mentions the target pod gives us a container ID;
+              # for each container we resolve its PID and unmount /sys/devices/virtual/powercap if present.
+              # Idempotent and best-effort: missing pod / missing mount is a no-op.
+              nsenter -t 1 -m -u -i -n -p -- /bin/bash -c '
+                set -u
+                pod_name="'"${TARGET_POD_NAME}"'"
+                namespace="'"${TARGET_NAMESPACE}"'"
+                if ! command -v crictl >/dev/null 2>&1; then
+                  echo "[WARN] crictl not available on host; skipping" >&2
+                  exit 0
+                fi
+
+                # crictl ps lists container ID, image, created, state, name, attempt, pod ID.
+                # Filter rows whose pod name (last column) matches the target pod.
+                cids=$(crictl ps --no-trunc 2>/dev/null | awk -v pod="${pod_name}" "\$0 ~ pod {print \$1}")
+                if [ -z "${cids}" ]; then
+                  echo "[INFO] No matching containers for pod ${namespace}/${pod_name} on this node"
+                  exit 0
+                fi
+
+                rc=0
+                for cid in ${cids}; do
+                  pid=$(crictl inspect "${cid}" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get(\"info\",{}).get(\"pid\",\"\"))" 2>/dev/null || true)
+                  if [ -z "${pid}" ] || [ "${pid}" = "null" ]; then
+                    echo "[WARN] Could not resolve PID for container ${cid}"
+                    continue
+                  fi
+
+                  if [ ! -r "/proc/${pid}/mountinfo" ]; then
+                    echo "[WARN] /proc/${pid}/mountinfo not readable"
+                    continue
+                  fi
+
+                  if grep -q "/sys/devices/virtual/powercap" "/proc/${pid}/mountinfo"; then
+                    echo "[INFO] Unmounting /sys/devices/virtual/powercap from container ${cid} (pid ${pid})"
+                    nsenter -t "${pid}" -m -- umount /sys/devices/virtual/powercap 2>/dev/null \
+                      || nsenter -t "${pid}" -m -- umount -l /sys/devices/virtual/powercap 2>/dev/null \
+                      || true
+
+                    if grep -q "/sys/devices/virtual/powercap" "/proc/${pid}/mountinfo"; then
+                      echo "[ERROR] powercap mount still present in container ${cid}"
+                      rc=1
+                    else
+                      echo "[OK] No powercap mount in container ${cid}"
+                    fi
+                  else
+                    echo "[OK] No powercap mount in container ${cid} (already absent)"
+                  fi
+                done
+                exit ${rc}
+              '
+
+              echo "[INFO] cleanup-incompatible-mounts done on node ${NODE_NAME}; entering idle wait for log inspection"
+              sleep 3600

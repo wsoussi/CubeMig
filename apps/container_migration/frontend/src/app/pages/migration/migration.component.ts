@@ -26,6 +26,10 @@ export class MigrationComponent implements OnInit, OnDestroy{
   isGeneratingFA = false;
   isGeneratingAISuggestion = false;
   disableIstioSidecar = false;
+  skipCpuCompatCheck = true;
+  cleanupIncompatibleMounts = false;
+  /** Track whether the user has manually overridden the auto-default for cleanupIncompatibleMounts. */
+  cleanupIncompatibleMountsTouched = false;
   loading = false;
   registryAddress = this.defaultPublicRegistry;
   routingDemoTrafficSubset = '';
@@ -141,6 +145,7 @@ export class MigrationComponent implements OnInit, OnDestroy{
         this.selectedTarget = fallbackTarget ? String(fallbackTarget.value) : '';
       }
       this.registryAddress = this.getRegistryForTarget(this.selectedTarget);
+      this.applyTargetClusterDefaults();
       this.trafficSwitchCluster = this.selectedSource || (options[0] ? String(options[0].value) : '');
       this.getPodsForSource();
       this.loadRoutingDemoTrafficSubset();
@@ -160,6 +165,7 @@ export class MigrationComponent implements OnInit, OnDestroy{
 
   public onTargetClusterChange(): void {
     this.registryAddress = this.getRegistryForTarget(this.selectedTarget);
+    this.applyTargetClusterDefaults();
   }
 
   private getRegistryForTarget(targetCluster: string): string {
@@ -168,6 +174,27 @@ export class MigrationComponent implements OnInit, OnDestroy{
       return this.pnetWireguardRegistry;
     }
     return this.defaultPublicRegistry;
+  }
+
+  /** PNET / SEV-SNP destinations lack the powercap mount paths CRIU restores need; default cleanup ON for them. */
+  public isHeterogeneousTarget(targetCluster: string): boolean {
+    const normalized = (targetCluster || '').trim().toLowerCase();
+    return (
+      normalized === 'pnet' ||
+      normalized === 'cluster-pnet' ||
+      normalized === 'sev-snp' ||
+      normalized === 'cluster-sev-snp'
+    );
+  }
+
+  private applyTargetClusterDefaults(): void {
+    if (!this.cleanupIncompatibleMountsTouched) {
+      this.cleanupIncompatibleMounts = this.isHeterogeneousTarget(this.selectedTarget);
+    }
+  }
+
+  public onCleanupIncompatibleMountsChange(): void {
+    this.cleanupIncompatibleMountsTouched = true;
   }
 
   public onTrafficSwitchClusterChange(): void {
@@ -279,13 +306,21 @@ export class MigrationComponent implements OnInit, OnDestroy{
   }
 
   public scaleRoutingDemoToOne(): void {
+    this.scaleRoutingDemoTo(1);
+  }
+
+  public scaleRoutingDemoToZero(): void {
+    this.scaleRoutingDemoTo(0);
+  }
+
+  private scaleRoutingDemoTo(replicas: number): void {
     const cluster = this.trafficSwitchCluster;
     if (!cluster) {
       this.messageService.add({ key: 'tst', severity: 'warn', summary: 'Scale', detail: 'No cluster selected.' });
       return;
     }
     this.replicaScaleLoading = true;
-    this.k8sService.scaleRoutingDemo(cluster, 1).pipe(
+    this.k8sService.scaleRoutingDemo(cluster, replicas).pipe(
       take(1),
       finalize(() => {
         this.replicaScaleLoading = false;
@@ -296,7 +331,7 @@ export class MigrationComponent implements OnInit, OnDestroy{
           key: 'tst',
           severity: 'success',
           summary: 'Deployment scale',
-          detail: r.message || 'routing-demo scaled to replicas=1'
+          detail: r.message || `routing-demo scaled to replicas=${replicas}`
         });
       },
       error: (err) => {
@@ -503,6 +538,9 @@ export class MigrationComponent implements OnInit, OnDestroy{
     this.isGeneratingFA = false;
     this.isGeneratingAISuggestion = false;
     this.disableIstioSidecar = false;
+    this.skipCpuCompatCheck = true;
+    this.cleanupIncompatibleMountsTouched = false;
+    this.cleanupIncompatibleMounts = this.isHeterogeneousTarget(this.selectedTarget);
     this.trafficSwitchCluster = this.sourceCluster.length ? String(this.sourceCluster[0].value) : '';
     this.loadRoutingDemoTrafficSubset();
   }
@@ -531,7 +569,9 @@ export class MigrationComponent implements OnInit, OnDestroy{
       registryAddress: (this.registryAddress || '').trim() || this.defaultPublicRegistry,
       forensicAnalysis: this.isGeneratingFA,
       AISuggestion: this.isGeneratingAISuggestion,
-      disableIstioSidecar: this.disableIstioSidecar
+      disableIstioSidecar: this.disableIstioSidecar,
+      skipCpuCompatCheck: this.skipCpuCompatCheck,
+      cleanupIncompatibleMounts: this.cleanupIncompatibleMounts
     };
     this.k8sService.migratePod(migrationRequest).pipe(
       take(1), // Ensures only one emission is taken

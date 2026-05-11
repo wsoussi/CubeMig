@@ -8,4 +8,6 @@ export interface MigrationRequest {
     forensicAnalysis: boolean;
     AISuggestion: boolean;
     disableIstioSidecar: boolean;
+    skipCpuCompatCheck: boolean;
+    cleanupIncompatibleMounts: boolean;
 }
