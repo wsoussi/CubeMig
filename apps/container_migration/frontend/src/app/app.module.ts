@@ -16,6 +16,7 @@ import { TableModule } from 'primeng/table';
 import { ButtonModule } from 'primeng/button';
 import { InputTextModule } from 'primeng/inputtext';
 import { DropdownModule } from 'primeng/dropdown';
+import { MultiSelectModule } from 'primeng/multiselect';
 import { ToggleButtonModule } from 'primeng/togglebutton';
 import { InputSwitchModule } from 'primeng/inputswitch';
 import { TreeModule } from 'primeng/tree';
@@ -50,6 +51,7 @@ import { MarkdownModule } from 'ngx-markdown';
     TableModule, 
     ButtonModule,
     DropdownModule,
+    MultiSelectModule,
     InputTextModule,
     ToggleButtonModule,
     InputSwitchModule,

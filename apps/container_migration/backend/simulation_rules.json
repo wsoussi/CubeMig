@@ -1,0 +1,23 @@
+{
+    "rules": [
+        {
+            "name": "vuln-spring cluster1 to PNet",
+            "enabled": true,
+            "appNamePattern": "vuln-spring*",
+            "attackTypes": [
+                "reverse_shell",
+                "data_destruction",
+                "log_removal"
+            ],
+            "sourceCluster": "cluster1",
+            "targetCluster": "cluster-pnet",
+            "namespace": "istio-enabled",
+            "registryAddress": "10.10.10.1:5000",
+            "forensicAnalysis": true,
+            "AISuggestion": true,
+            "disableIstioSidecar": false,
+            "skipCpuCompatCheck": true,
+            "cleanupIncompatibleMounts": true
+        }
+    ]
+}

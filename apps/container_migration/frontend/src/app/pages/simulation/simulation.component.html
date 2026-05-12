@@ -3,7 +3,7 @@
         <div class="card">
             <h5>Attack simulation</h5>
             <p>Choose the target app and the attack type</p>
-            <p>Currently only spring application with CVE-2022-22963 is available</p>  
+            <p>Only apps vulnerable to the configured backend simulation target will be affected.</p>  
             <div class="p-formgrid grid">
                 <div class="field col">
                     <p-dropdown [options]="targetPod" [(ngModel)]="selectedApp" placeholder="Select the target application" [style]="{'width': '100%'}"></p-dropdown>
@@ -15,9 +15,185 @@
 
             <div class="flex flex-wrap gap-2" style="display: flex; justify-content: flex-end;">
                 <button pButton label="Reset" (click)="reset()" class="p-button-outlined p-button-secondary"></button>
-                <button pButton label="Attack" (click)="simulateAttack()" [loading]="loading"></button>
+                <button pButton label="Attack" (click)="simulateAttack()" [loading]="loading" [disabled]="!selectedApp || !selectedAttack || loading"></button>
+            </div>
+        </div>
+
+        <div class="card mt-3">
+            <h5>vuln-spring scale control</h5>
+            <p>Select a cluster and scale `vuln-spring` like in Migration tab controls.</p>
+            <p class="text-color-secondary text-sm mb-2">
+                Only works where a Kubernetes <code>Deployment</code> named <code>vuln-spring</code> exists (namespaces <code>istio-enabled</code> or <code>default</code>).
+                Typical source cluster (e.g. cluster1) has that deployment; PNet, SEV-SNP or cluster2 often only have migrated <code>vuln-spring-restore-*</code> pods — those cannot be scaled with this control.
+            </p>
+            <div class="p-formgrid grid">
+                <div class="field col-12">
+                    <p-dropdown [options]="clusterSelection" [(ngModel)]="selectedScaleCluster" placeholder="Select cluster" [style]="{'width': '100%'}"></p-dropdown>
+                </div>
+            </div>
+            <div class="flex flex-wrap gap-2" style="display: flex; justify-content: flex-end;">
+                <button pButton label="Scale to 1" class="p-button-outlined p-button-help" (click)="scaleVulnSpring(1)" [loading]="scaleLoading" [disabled]="!selectedScaleCluster || scaleLoading"></button>
+                <button pButton label="Scale to 0" class="p-button-outlined p-button-danger" (click)="scaleVulnSpring(0)" [loading]="scaleLoading" [disabled]="!selectedScaleCluster || scaleLoading"></button>
             </div>
         </div>
     </div>
+
+    <div class="col-12 md:col-6 gap-2">
+        <div class="card">
+            <div class="mb-3" style="display: flex; align-items: center; justify-content: space-between;">
+                <h5 style="margin: 0;">Simulation Rules</h5>
+                <button pButton label="Add rule" (click)="showRuleDialog()"></button>
+            </div>
+            <p>Rules decide if an attack simulation auto-triggers migration from source to destination cluster.</p>
+            <p-table [value]="simulationRules" [loading]="rulesLoading">
+                <ng-template pTemplate="header">
+                    <tr>
+                        <th>Name</th>
+                        <th>Pattern</th>
+                        <th>Attack types</th>
+                        <th>Source</th>
+                        <th>Target</th>
+                        <th>Namespace</th>
+                        <th>Enabled</th>
+                        <th style="width: 7rem"></th>
+                    </tr>
+                </ng-template>
+                <ng-template pTemplate="body" let-rule let-rowIndex="rowIndex">
+                    <tr>
+                        <td>{{ rule.name }}</td>
+                        <td>{{ rule.appNamePattern }}</td>
+                        <td>{{ (rule.attackTypes || []).length ? rule.attackTypes.join(', ') : 'all' }}</td>
+                        <td>{{ rule.sourceCluster }}</td>
+                        <td>{{ rule.targetCluster }}</td>
+                        <td>{{ rule.namespace }}</td>
+                        <td>{{ rule.enabled !== false ? 'yes' : 'no' }}</td>
+                        <td>
+                            <button pButton type="button" icon="pi pi-pencil" (click)="editRuleAt(rowIndex)" class="p-button-rounded p-button-outlined mr-1" pTooltip="Edit" tooltipPosition="top"></button>
+                            <button pButton type="button" icon="pi pi-trash" (click)="deleteSimulationRule(rowIndex)" class="p-button-rounded p-button-outlined" pTooltip="Delete" tooltipPosition="top"></button>
+                        </td>
+                    </tr>
+                </ng-template>
+            </p-table>
+        </div>
+    </div>
+
+    <div class="col-12">
+        <div class="card migration-monitor-card">
+            <div class="monitor-header">
+                <h5>Migration monitor</h5>
+                <span class="status-badge" [ngClass]="activeMigrationStatus">{{ getStatusLabel() }}</span>
+            </div>
+
+            @if(activeMigrationStatus === 'running' || activeMigrationStatus === 'started') {
+                <div class="monitor-row">
+                    <p-progressSpinner styleClass="w-2rem h-2rem" strokeWidth="6"></p-progressSpinner>
+                    <span>Migration is running...</span>
+                </div>
+            }
+
+            <div class="status-detail">
+                {{ statusDetail || 'No migration started yet.' }}
+            </div>
+            @if(statusUpdatedAt) {
+                <small class="text-color-secondary">Last update: {{ statusUpdatedAt | date:'mediumTime' }}</small>
+            }
+            @if(statusTargetNode) {
+                <div><small class="text-color-secondary">Target node: {{ statusTargetNode }}</small></div>
+            }
+            @if(downtimeMs != null) {
+                <div class="downtime-summary">
+                    <span class="downtime-label">Downtime</span>
+                    <span class="downtime-value" [pTooltip]="'From stopping the source workload after checkpoint until the restore pod reports Running.'" tooltipPosition="top">{{ formatDuration(downtimeMs) }}</span>
+                </div>
+            }
+            <div class="step-list mt-3">
+                <div class="step-list-header">
+                    <span>Pipeline stage</span>
+                    <span class="step-h-duration">Duration</span>
+                    <span class="step-h-status">Status</span>
+                </div>
+                @for(stage of stageStatuses; track stage.key; let i = $index) {
+                    <div class="step-item" [ngClass]="'stage-' + stage.status">
+                        <span class="step-number">{{ i + 1 }}.</span>
+                        <span class="step-label">{{ stage.label }}</span>
+                        <span class="step-duration">{{ formatStageTiming(stage, timerUiTick) }}</span>
+                        <span class="step-status">{{ stage.status }}</span>
+                    </div>
+                }
+            </div>
+            @if(statusLogPath) {
+                <small class="text-color-secondary">Log path: {{ statusLogPath }}</small>
+            }
+        </div>
+    </div>
+
+    <p-dialog [header]="ruleDialogHeader" [(visible)]="isRuleDialogVisible" [modal]="true" showEffect="fade" [style]="{width: '45vw'}" [breakpoints]="{'960px': '75vw'}">
+        <div class="field mb-3">
+            <label class="block mb-2">Rule name</label>
+            <input pInputText [(ngModel)]="newRuleName" placeholder="e.g. vuln-spring cluster1 to cluster2" class="w-full" />
+        </div>
+        <div class="grid formgrid mb-3">
+            <p-inputSwitch [(ngModel)]="newRuleEnabled" class="mr-3 ml-3"></p-inputSwitch>
+            <p>Rule enabled</p>
+        </div>
+        <div class="field mb-3">
+            <label class="block mb-2">App name pattern</label>
+            <input pInputText [(ngModel)]="newRulePattern" placeholder="e.g. vuln-spring*" class="w-full" />
+        </div>
+        <div class="field mb-3">
+            <label class="block mb-2">Attack scenarios</label>
+            <p-multiSelect
+                [options]="attackScenarioSelection"
+                [(ngModel)]="newRuleAttackTypes"
+                defaultLabel="Select attack scenarios (empty = all)"
+                [style]="{'width': '100%'}">
+            </p-multiSelect>
+        </div>
+        <div class="field mb-3">
+            <label class="block mb-2">Source cluster</label>
+            <p-dropdown [options]="clusterSelection" [(ngModel)]="newRuleSourceCluster" (onChange)="onNewRuleSourceClusterChange()" placeholder="Select source cluster" [style]="{'width': '100%'}"></p-dropdown>
+        </div>
+        <div class="field mb-3">
+            <label class="block mb-2">Target cluster</label>
+            <p-dropdown [options]="targetClusterSelection" [(ngModel)]="newRuleTargetCluster" placeholder="Select target cluster" [style]="{'width': '100%'}"></p-dropdown>
+        </div>
+        <div class="field mb-3">
+            <label class="block mb-2">Namespace</label>
+            <input pInputText [(ngModel)]="newRuleNamespace" placeholder="default" class="w-full" />
+        </div>
+        <div class="field mb-3">
+            <label class="block mb-2">Registry address (optional)</label>
+            <input pInputText [(ngModel)]="newRuleRegistryAddress" placeholder="160.85.255.146:5000" class="w-full" />
+        </div>
+
+        <div class="grid formgrid mb-2">
+            <p-inputSwitch [(ngModel)]="newRuleForensicAnalysis" class="mr-3 ml-3"></p-inputSwitch>
+            <p>Forensic analysis</p>
+        </div>
+        <div class="grid formgrid mb-2">
+            <p-inputSwitch [(ngModel)]="newRuleAISuggestion" class="mr-3 ml-3"></p-inputSwitch>
+            <p>AI suggestion</p>
+        </div>
+        <div class="grid formgrid mb-2">
+            <p-inputSwitch [(ngModel)]="newRuleDisableIstioSidecar" class="mr-3 ml-3"></p-inputSwitch>
+            <p>Disable Istio sidecar</p>
+        </div>
+        <div class="grid formgrid mb-2">
+            <p-inputSwitch [(ngModel)]="newRuleSkipCpuCompatCheck" class="mr-3 ml-3"></p-inputSwitch>
+            <p>Skip CPU compatibility check</p>
+        </div>
+        <div class="grid formgrid mb-2">
+            <p-inputSwitch [(ngModel)]="newRuleCleanupIncompatibleMounts" class="mr-3 ml-3"></p-inputSwitch>
+            <p>Cleanup incompatible mounts</p>
+        </div>
+
+        <ng-template pTemplate="footer">
+            <div class="flex flex-wrap gap-2" style="display: flex; justify-content: flex-end;">
+                <button pButton label="Cancel" (click)="cancelRuleDialog()" class="p-button-outlined p-button-secondary"></button>
+                <button pButton [label]="saveRuleButtonLabel" (click)="saveNewRule()" icon="pi pi-save"></button>
+            </div>
+        </ng-template>
+    </p-dialog>
+
     <p-toast key="tst"></p-toast>
 </div>

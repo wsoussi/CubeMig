@@ -39,7 +39,7 @@ export class MigrationComponent implements OnInit, OnDestroy{
   replicaScaleLoading = false;
   /** Kube context for VirtualService <code>routing-demo</code> (separate from migration source — use after migration). */
   trafficSwitchCluster = '';
-  probeUrl = 'http://10.0.0.29:32366/whoami';
+  probeUrl = 'http://10.0.0.18:32366/whoami';
   probeIntervalMs = 1000;
   probeConnectTimeoutS = 2;
   probeMaxTimeS = 10;
@@ -56,6 +56,8 @@ export class MigrationComponent implements OnInit, OnDestroy{
     counter: number | null;
     stderr?: string;
   }> = [];
+  /** Oldest probe bars are dropped from the chart once there are more than this many samples (metrics still use the full buffer). */
+  readonly probeChartMaxBars = 72;
   probeDowntimeWindows: Array<{
     start: Date;
     end?: Date;
@@ -480,8 +482,23 @@ export class MigrationComponent implements OnInit, OnDestroy{
     return max > 0 ? max : 1;
   }
 
-  public getProbeBarHeight(totalMs: number): number {
-    const max = this.getProbeMaxMs();
+  public getProbeSamplesForChart(): typeof this.probeSamples {
+    const cap = this.probeChartMaxBars;
+    return this.probeSamples.length <= cap ? this.probeSamples : this.probeSamples.slice(-cap);
+  }
+
+  public getProbeChartMaxMs(): number {
+    const visible = this.getProbeSamplesForChart();
+    const max = visible.reduce((acc, s) => Math.max(acc, s.totalMs || 0), 0);
+    return max > 0 ? max : 1;
+  }
+
+  public getProbeChartMidMs(): number {
+    return this.getProbeChartMaxMs() / 2;
+  }
+
+  public getProbeBarHeightForChart(totalMs: number): number {
+    const max = this.getProbeChartMaxMs();
     return Math.max(4, Math.round((Math.max(totalMs, 0) / max) * 100));
   }
 
@@ -503,10 +520,6 @@ export class MigrationComponent implements OnInit, OnDestroy{
       return '-';
     }
     return latest.counter == null ? 'n/a' : String(latest.counter);
-  }
-
-  public getProbeMidMs(): number {
-    return this.getProbeMaxMs() / 2;
   }
 
   private resolveCounterValue(counter: number | null | undefined, stdoutJson: Record<string, unknown> | null | undefined): number | null {

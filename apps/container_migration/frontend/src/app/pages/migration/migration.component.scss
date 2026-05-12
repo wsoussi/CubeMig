@@ -51,6 +51,8 @@
   background: var(--surface-ground);
   min-height: 120px;
   padding: 0.5rem;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .probe-metrics {
@@ -83,6 +85,7 @@
   grid-template-columns: 4.5rem minmax(0, 1fr);
   gap: 0.5rem;
   align-items: stretch;
+  min-width: 0;
 }
 
 .probe-y-axis {
@@ -98,16 +101,19 @@
 .probe-bars {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(4px, 1fr);
+  grid-auto-columns: minmax(0, 1fr);
   align-items: end;
   gap: 2px;
   height: 120px;
+  min-width: 0;
+  width: 100%;
 }
 
 .probe-bar-wrapper {
   display: flex;
   align-items: end;
   height: 120px;
+  min-width: 0;
 }
 
 .probe-bar {

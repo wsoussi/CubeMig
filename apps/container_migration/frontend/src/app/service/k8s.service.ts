@@ -95,6 +95,20 @@ export class K8sService {
     });
   }
 
+  scaleVulnSpring(cluster: string, replicas = 1): Observable<{
+    cluster: string;
+    deployment: string;
+    namespace: string;
+    replicas: number;
+    message: string;
+  }> {
+    const url = `${this.apiUrl}/k8s/vuln-spring/scale`;
+    return this.http.post<{ cluster: string; deployment: string; namespace: string; replicas: number; message: string }>(url, {
+      cluster,
+      replicas
+    });
+  }
+
   runHttpProbe(url: string, connectTimeoutS = 2, maxTimeS = 10): Observable<{
     timestamp: string;
     url: string;

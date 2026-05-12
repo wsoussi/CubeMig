@@ -87,7 +87,7 @@
             <div class="p-formgrid grid">
                 <div class="field col-12">
                     <label for="probeUrl" class="block mb-2">Target URL</label>
-                    <input id="probeUrl" pInputText type="text" [(ngModel)]="probeUrl" placeholder="http://10.0.0.29:32366/whoami" [disabled]="probeRunning" class="w-full"/>
+                    <input id="probeUrl" pInputText type="text" [(ngModel)]="probeUrl" placeholder="http://10.0.0.18:32366/whoami" [disabled]="probeRunning" class="w-full"/>
                 </div>
                 <div class="field col-12 md:col-4">
                     <label for="probeIntervalMs" class="block mb-2">Interval (ms)</label>
@@ -128,18 +128,21 @@
                 <span class="ok-dot"></span><span>OK</span>
                 <span class="down-dot ml-3"></span><span>Downtime / error</span>
             </div>
+            @if (probeSamples.length > probeChartMaxBars) {
+                <p class="text-sm text-color-secondary mb-2">Chart shows the latest {{ probeChartMaxBars }} samples; older bars are hidden.</p>
+            }
             <div class="probe-chart">
                 @if (probeSamples.length > 0) {
                     <div class="probe-chart-grid">
                         <div class="probe-y-axis">
-                            <span>{{ roundMs(getProbeMaxMs()) }} ms</span>
-                            <span>{{ roundMs(getProbeMidMs()) }} ms</span>
+                            <span>{{ roundMs(getProbeChartMaxMs()) }} ms</span>
+                            <span>{{ roundMs(getProbeChartMidMs()) }} ms</span>
                             <span>0 ms</span>
                         </div>
                         <div class="probe-bars">
-                            @for (sample of probeSamples; track sample.seq) {
+                            @for (sample of getProbeSamplesForChart(); track sample.seq) {
                                 <div class="probe-bar-wrapper" [pTooltip]="'#' + sample.seq + ' | ' + formatProbeTimestamp(sample.timestamp) + ' | ' + roundMs(sample.totalMs) + ' ms | HTTP ' + sample.httpCode + ' | counter=' + (sample.counter == null ? 'n/a' : sample.counter)" tooltipPosition="top">
-                                    <div class="probe-bar" [ngClass]="sample.ok ? 'ok' : 'down'" [style.height.%]="getProbeBarHeight(sample.totalMs)"></div>
+                                    <div class="probe-bar" [ngClass]="sample.ok ? 'ok' : 'down'" [style.height.%]="getProbeBarHeightForChart(sample.totalMs)"></div>
                                 </div>
                             }
                         </div>

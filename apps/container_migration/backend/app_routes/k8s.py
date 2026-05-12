@@ -12,6 +12,8 @@ ROUTING_DEMO_VS_NAME = "routing-demo"
 ROUTING_DEMO_NAMESPACE = "istio-enabled"
 ROUTING_DEMO_SUBSET_JSON_PATH = "/spec/http/0/route/0/destination/subset"
 ROUTING_DEMO_FAULT_JSON_PATH = "/spec/http/0/fault"
+VULN_SPRING_DEPLOYMENT = "vuln-spring"
+VULN_SPRING_NAMESPACES = ["istio-enabled", "default"]
 
 
 class RoutingDemoTrafficClusterBody(BaseModel):
@@ -21,6 +23,11 @@ class RoutingDemoTrafficClusterBody(BaseModel):
 class RoutingDemoScaleBody(BaseModel):
     cluster: str = Field(..., description="Kube context where deployment routing-demo should be scaled")
     replicas: int = Field(1, ge=0, le=20, description="Target replicas for deployment routing-demo")
+
+
+class VulnSpringScaleBody(BaseModel):
+    cluster: str = Field(..., description="Kube context where deployment vuln-spring should be scaled")
+    replicas: int = Field(1, ge=0, le=20, description="Target replicas for deployment vuln-spring")
 
 
 class HttpProbeBody(BaseModel):
@@ -271,6 +278,62 @@ def scale_routing_demo(body: RoutingDemoScaleBody):
         "namespace": ROUTING_DEMO_NAMESPACE,
         "replicas": body.replicas,
         "message": f"Scaled deployment {ROUTING_DEMO_VS_NAME} to replicas={body.replicas} in {cluster}",
+    }
+
+
+@router.post("/vuln-spring/scale")
+def scale_vuln_spring(body: VulnSpringScaleBody):
+    """Scale deployment vuln-spring in istio-enabled namespace."""
+    cluster = body.cluster
+    _require_cluster(cluster)
+
+    selected_namespace = None
+    for namespace in VULN_SPRING_NAMESPACES:
+        probe = _kubectl(
+            cluster,
+            [
+                "get",
+                "deploy",
+                VULN_SPRING_DEPLOYMENT,
+                "-n",
+                namespace,
+            ],
+        )
+        if probe.returncode == 0:
+            selected_namespace = namespace
+            break
+    if not selected_namespace:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Deployment {VULN_SPRING_DEPLOYMENT} not found in namespaces "
+                f"{', '.join(VULN_SPRING_NAMESPACES)} on cluster {cluster}"
+            ),
+        )
+
+    proc = _kubectl(
+        cluster,
+        [
+            "scale",
+            "deploy",
+            VULN_SPRING_DEPLOYMENT,
+            "-n",
+            selected_namespace,
+            f"--replicas={body.replicas}",
+        ],
+    )
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=500,
+            detail=(proc.stderr or proc.stdout or "kubectl scale failed").strip(),
+        )
+
+    return {
+        "cluster": cluster,
+        "deployment": VULN_SPRING_DEPLOYMENT,
+        "namespace": selected_namespace,
+        "replicas": body.replicas,
+        "message": f"Scaled deployment {VULN_SPRING_DEPLOYMENT} to replicas={body.replicas} in {cluster}/{selected_namespace}",
     }
 
 

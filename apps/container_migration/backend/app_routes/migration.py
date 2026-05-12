@@ -13,6 +13,7 @@ import pytz
 router = APIRouter()
 
 triggeredMigrations = []
+activeMigrations: dict[str, str] = {}
 base_log_path = "/home/ubuntu/contMigration_logs"
 config = load_config()
 timezone = pytz.timezone('Europe/Berlin')
@@ -551,6 +552,16 @@ async def handle_alerts(alert: Alert):
     return {"message": "No action taken"}
 
 async def trigger_migration(info: MigrationInfo):
+    pod_name = (info.k8s_pod_name or "").strip()
+    if not pod_name:
+        raise HTTPException(status_code=400, detail="k8s_pod_name is required")
+    if pod_name in activeMigrations:
+        return {
+            "message": f"Migration already running for pod {pod_name}",
+            "log_path": activeMigrations[pod_name],
+            "already_running": True
+        }
+
     log_path = f"{base_log_path}/{info.container_name}/{info.timestamp.replace(':', '-')}_{info.k8s_pod_name}"
     os.makedirs(log_path, exist_ok=True)
     with open(f"{log_path}/migration_log.txt", "w") as file:
@@ -565,6 +576,7 @@ async def trigger_migration(info: MigrationInfo):
     print(f"Forensic analysis: {info.forensic_analysis}")
     print(f"AI suggestion: {info.AI_suggestion}")
 
+    activeMigrations[pod_name] = log_path
     # Start the migration process in the background
     asyncio.create_task(run_migration_script(info, log_path))
     
@@ -624,6 +636,10 @@ async def run_migration_script(info: MigrationInfo, log_path: str):
             file.write(f"Migration error at {datetime.now(timezone)}\n")
             file.write(f"Error: {str(e)}\n")
         print(f"Error during migration of {info.k8s_pod_name}: {str(e)}")
+    finally:
+        pod_name = (info.k8s_pod_name or "").strip()
+        if pod_name and activeMigrations.get(pod_name) == log_path:
+            activeMigrations.pop(pod_name, None)
 
 def handle_log(info: MigrationInfo):
     log_path = f"{base_log_path}/{info.container_name}/{info.timestamp.replace(':', '-')}_{info.k8s_pod_name}"
