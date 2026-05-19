@@ -1,241 +1,168 @@
-from datetime import datetime
-from fnmatch import fnmatch
 from fastapi import APIRouter, HTTPException
-import json
 import os
-from pydantic import BaseModel, Field
-import sys 
+import re
+import sys
 from models.simulation_info import SimulationInfo
-from models.migration_info import MigrationInfo
 from requests import exceptions as requests_exceptions
 from utils.k8s_client import k8s_client
-from app_routes.migration import trigger_migration
 
 sys.path.append('/home/ubuntu/ContMigration-VT1/apps/kubernetes/vuln-spring/')
 
-from vuln_spring_exploit import reverse_shell, data_destruction, log_removal # type: ignore
+from vuln_spring_exploit import reverse_shell, data_destruction, log_removal  # type: ignore
 
 router = APIRouter()
 DEFAULT_SIMULATION_TARGET_URL = "http://10.0.0.29:30081"
-target_url = (os.getenv("SIMULATION_TARGET_URL", DEFAULT_SIMULATION_TARGET_URL) or DEFAULT_SIMULATION_TARGET_URL).rstrip("/")
-DEFAULT_SIMULATION_RULES_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "simulation_rules.json")
-)
-SIMULATION_RULES_PATH = os.getenv("SIMULATION_RULES_PATH", DEFAULT_SIMULATION_RULES_PATH)
-SUPPORTED_ATTACK_TYPES = {"reverse_shell", "data_destruction", "log_removal"}
+DEFAULT_TARGET_URL = (os.getenv("SIMULATION_TARGET_URL", DEFAULT_SIMULATION_TARGET_URL) or DEFAULT_SIMULATION_TARGET_URL).rstrip("/")
+DEFAULT_REVERSE_SHELL_LISTENER_IP = os.getenv("SIMULATION_LISTENER_IP", "10.0.0.180")
+DEFAULT_REVERSE_SHELL_LISTENER_PORT = os.getenv("SIMULATION_LISTENER_PORT", "4444")
 SUPPORTED_APP_PREFIX = "vuln-spring"
+VULN_SPRING_SERVICE_NAME = "vuln-spring"
+VULN_SPRING_NAMESPACES = ("istio-enabled", "default")
 
-class SimulationRule(BaseModel):
-    name: str = Field(..., description="Human-readable rule name")
-    enabled: bool = True
-    appNamePattern: str = "*"
-    attackTypes: list[str] = Field(default_factory=list)
-    sourceCluster: str
-    targetCluster: str
-    namespace: str = "default"
-    registryAddress: str | None = None
-    forensicAnalysis: bool = False
-    AISuggestion: bool = False
-    disableIstioSidecar: bool = False
-    skipCpuCompatCheck: bool = True
-    cleanupIncompatibleMounts: bool = False
+# Every simulated attack performs an action that Falco picks up with a specific default
+# rule. We keep this mapping authoritative on the backend so the UI and the user understand
+# which Falco rule (and therefore which config.json entry) will fire after the attack.
+ATTACK_FALCO_RULES: dict[str, str] = {
+    "reverse_shell": "Redirect STDOUT/STDIN to Network Connection in Container",
+    "data_destruction": "Remove Bulk Data from Disk",
+    "log_removal": "Clear Log Activities",
+}
+SUPPORTED_ATTACK_TYPES = set(ATTACK_FALCO_RULES.keys())
 
-class SimulationRulesPayload(BaseModel):
-    rules: list[SimulationRule]
 
-def _load_simulation_rules_payload() -> dict:
+def _env_override_for_cluster(cluster: str) -> str | None:
+    """Allow operators to pin a target URL per cluster via env (e.g. SIMULATION_TARGET_URL_CLUSTER1)."""
+    if not cluster:
+        return None
+    key = "SIMULATION_TARGET_URL_" + re.sub(r"[^A-Za-z0-9]", "_", cluster).upper()
+    value = os.getenv(key)
+    return value.rstrip("/") if value else None
+
+
+def _find_vuln_spring_nodeport(client_api, namespaces: tuple[str, ...] = VULN_SPRING_NAMESPACES):
+    """Locate the vuln-spring Service in the cluster and return (namespace, nodePort)."""
+    for namespace in namespaces:
+        try:
+            svc = client_api.read_namespaced_service(name=VULN_SPRING_SERVICE_NAME, namespace=namespace)
+        except Exception:
+            continue
+        for port in (svc.spec.ports or []):
+            if port.node_port:
+                return namespace, int(port.node_port)
+    return None, None
+
+
+def _pick_node_address(client_api) -> str | None:
+    """Pick a usable node address (prefer ExternalIP, fall back to InternalIP) from any Ready node."""
     try:
-        with open(SIMULATION_RULES_PATH, "r") as file:
-            data = json.load(file)
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Simulation rules file not found: {SIMULATION_RULES_PATH}"
-        ) from exc
-    except json.JSONDecodeError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Invalid simulation rules JSON in {SIMULATION_RULES_PATH}: {exc}"
-        ) from exc
+        nodes = client_api.list_node()
+    except Exception:
+        return None
 
-    if not isinstance(data, dict) or not isinstance(data.get("rules"), list):
-        raise HTTPException(
-            status_code=500,
-            detail=f"Invalid simulation rules format in {SIMULATION_RULES_PATH}: expected object with 'rules' array"
-        )
-    return data
-
-def _load_simulation_rules() -> list[dict]:
-    payload = SimulationRulesPayload.model_validate(_load_simulation_rules_payload())
-    return [rule.model_dump() for rule in payload.rules]
-
-def _save_simulation_rules(rules: list[dict]):
-    payload = SimulationRulesPayload.model_validate({"rules": rules})
-    with open(SIMULATION_RULES_PATH, "w") as file:
-        json.dump(payload.model_dump(), file, indent=4)
-
-def _normalize_attack_types(attack_types: list[str] | None) -> set[str]:
-    if not attack_types:
-        return set()
-    return {str(value).strip() for value in attack_types if str(value).strip()}
-
-def _rules_target_conflict(existing_rule: dict, new_rule: SimulationRule) -> bool:
-    same_scope = (
-        str(existing_rule.get("appNamePattern", "*")).strip() == (new_rule.appNamePattern or "*").strip()
-        and str(existing_rule.get("sourceCluster", "")).strip() == new_rule.sourceCluster.strip()
-        and str(existing_rule.get("targetCluster", "")).strip() == new_rule.targetCluster.strip()
-        and str(existing_rule.get("namespace", "default")).strip() == (new_rule.namespace or "default").strip()
-    )
-    if not same_scope:
+    def is_ready(node) -> bool:
+        for condition in (node.status.conditions or []):
+            if condition.type == "Ready":
+                return condition.status == "True"
         return False
 
-    existing_attacks = _normalize_attack_types(existing_rule.get("attackTypes"))
-    new_attacks = _normalize_attack_types(new_rule.attackTypes)
-    # Empty list means "all attack types", therefore overlaps with everything.
-    if not existing_attacks or not new_attacks:
-        return True
-    return len(existing_attacks.intersection(new_attacks)) > 0
-
-
-def _find_conflicting_rule_index(
-    rules: list[dict], rule: SimulationRule, skip_index: int | None = None
-) -> int | None:
-    for i, existing_rule in enumerate(rules):
-        if skip_index is not None and i == skip_index:
-            continue
-        if _rules_target_conflict(existing_rule, rule):
-            return i
+    ready_nodes = [n for n in nodes.items if is_ready(n)] or nodes.items
+    for address_type in ("ExternalIP", "InternalIP"):
+        for node in ready_nodes:
+            for addr in (node.status.addresses or []):
+                if addr.type == address_type and addr.address:
+                    return addr.address
     return None
 
 
-def _rule_matches(rule: dict, app_name: str, attack_type: str) -> bool:
-    if not rule.get("enabled", True):
-        return False
+def _resolve_target_url(cluster: str | None) -> tuple[str, dict]:
+    """Resolve the vuln-spring attack URL for the given cluster.
 
-    app_pattern = str(rule.get("appNamePattern", "*")).strip() or "*"
-    if not fnmatch(app_name, app_pattern):
-        return False
+    Resolution order:
+      1) env override SIMULATION_TARGET_URL_<CLUSTER>
+      2) auto-discovery via Kubernetes API (Service NodePort + Node IP)
+      3) global default SIMULATION_TARGET_URL / hardcoded fallback
+    Returns the URL plus a metadata dict for the response (source, namespace, etc.).
+    """
+    if cluster:
+        override = _env_override_for_cluster(cluster)
+        if override:
+            return override, {"source": "env_override", "cluster": cluster}
 
-    attack_types = rule.get("attackTypes", [])
-    if not isinstance(attack_types, list):
-        return False
-    if attack_types and attack_type not in [str(x).strip() for x in attack_types]:
-        return False
-    return True
+        try:
+            client_api = k8s_client.get_client(cluster)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Unknown cluster: {cluster} ({exc})") from exc
 
-def _find_source_pod(source_cluster: str, namespace: str, app_name: str) -> str:
-    client = k8s_client.get_client(source_cluster)
-    pods = client.list_namespaced_pod(namespace=namespace, label_selector=f"app={app_name}")
-    running = [pod for pod in pods.items if pod.status and pod.status.phase == "Running"]
-    if not running:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No running pod found for app '{app_name}' in {source_cluster}/{namespace}"
-        )
-    return running[0].metadata.name
-
-async def _maybe_trigger_rule_based_migration(app_name: str, attack_type: str):
-    rules = _load_simulation_rules()
-    for rule in rules:
-        if not _rule_matches(rule, app_name, attack_type):
-            continue
-
-        source_cluster = str(rule.get("sourceCluster", "")).strip()
-        target_cluster = str(rule.get("targetCluster", "")).strip()
-        namespace = str(rule.get("namespace", "default")).strip() or "default"
-        if not source_cluster or not target_cluster:
-            raise HTTPException(status_code=500, detail="Simulation rule missing sourceCluster/targetCluster")
-        if source_cluster == target_cluster:
-            raise HTTPException(status_code=500, detail="Simulation rule has identical sourceCluster and targetCluster")
-        if not k8s_client.has_cluster(source_cluster):
-            raise HTTPException(status_code=400, detail=f"Unknown source cluster in simulation rule: {source_cluster}")
-        if not k8s_client.has_cluster(target_cluster):
-            raise HTTPException(status_code=400, detail=f"Unknown target cluster in simulation rule: {target_cluster}")
-
-        pod_name = _find_source_pod(source_cluster, namespace, app_name)
-        info = MigrationInfo(
-            k8s_pod_name=pod_name,
-            container_name=app_name,
-            migration_type="manual",
-            source_cluster=source_cluster,
-            target_cluster=target_cluster,
-            namespace=namespace,
-            registry_address=((rule.get("registryAddress") or "")).strip() or None,
-            forensic_analysis=bool(rule.get("forensicAnalysis", False)),
-            AI_suggestion=bool(rule.get("AISuggestion", False)),
-            disable_istio_sidecar=bool(rule.get("disableIstioSidecar", False)),
-            skip_cpu_compat_check=bool(rule.get("skipCpuCompatCheck", True)),
-            cleanup_incompatible_mounts=bool(rule.get("cleanupIncompatibleMounts", False)),
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        )
-        migration = await trigger_migration(info)
-        return {
-            "rule_name": rule.get("name", "unnamed-rule"),
-            "source_cluster": source_cluster,
-            "target_cluster": target_cluster,
+        namespace, node_port = _find_vuln_spring_nodeport(client_api)
+        if not node_port:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Service '{VULN_SPRING_SERVICE_NAME}' with a NodePort not found in "
+                    f"{'/'.join(VULN_SPRING_NAMESPACES)} on cluster '{cluster}'"
+                ),
+            )
+        node_ip = _pick_node_address(client_api)
+        if not node_ip:
+            raise HTTPException(
+                status_code=503,
+                detail=f"No Ready node with a routable address found on cluster '{cluster}'",
+            )
+        return f"http://{node_ip}:{node_port}", {
+            "source": "auto_discovery",
+            "cluster": cluster,
             "namespace": namespace,
-            "pod_name": pod_name,
-            "migration": migration
+            "nodePort": node_port,
+            "nodeAddress": node_ip,
         }
 
+    return DEFAULT_TARGET_URL, {"source": "default", "cluster": None}
+
+
+def _find_running_pod(cluster: str, namespace: str | None, app_name: str) -> str | None:
+    """Best-effort lookup of a running pod backing the attacked Service (for response info)."""
+    if not cluster or not app_name:
+        return None
+    try:
+        client_api = k8s_client.get_client(cluster)
+    except Exception:
+        return None
+    namespaces = [namespace] if namespace else list(VULN_SPRING_NAMESPACES)
+    for ns in namespaces:
+        try:
+            pods = client_api.list_namespaced_pod(namespace=ns, label_selector=f"app={app_name}")
+        except Exception:
+            continue
+        for pod in pods.items:
+            if pod.status and pod.status.phase == "Running":
+                return pod.metadata.name
     return None
 
-@router.get("/rules")
-def get_simulation_rules():
-    return _load_simulation_rules_payload()
 
-@router.post("/rules")
-def add_simulation_rule(rule: SimulationRule):
-    payload = _load_simulation_rules_payload()
-    rules = payload.get("rules", [])
-    if _find_conflicting_rule_index(rules, rule) is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "A simulation rule already targets the same scope "
-                "(appNamePattern/sourceCluster/targetCluster/namespace) with overlapping attack scenarios."
-            ),
-        )
-    rules.append(rule.model_dump())
-    _save_simulation_rules(rules)
-    return {"message": "Simulation rule added successfully"}
+@router.get("/attack-mapping")
+def get_attack_mapping():
+    """Expose the static attack -> Falco rule mapping for the frontend."""
+    return {
+        "mapping": [
+            {"attackType": attack, "falcoRule": rule}
+            for attack, rule in ATTACK_FALCO_RULES.items()
+        ]
+    }
 
-
-@router.put("/rules/{index}")
-def update_simulation_rule(index: int, rule: SimulationRule):
-    payload = _load_simulation_rules_payload()
-    rules = payload.get("rules", [])
-    if index < 0 or index >= len(rules):
-        raise HTTPException(status_code=404, detail=f"Index '{index}' out of range")
-    if _find_conflicting_rule_index(rules, rule, skip_index=index) is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "A simulation rule already targets the same scope "
-                "(appNamePattern/sourceCluster/targetCluster/namespace) with overlapping attack scenarios."
-            ),
-        )
-    rules[index] = rule.model_dump()
-    _save_simulation_rules(rules)
-    return {"message": "Simulation rule updated successfully"}
-
-
-@router.delete("/rules/{index}")
-def delete_simulation_rule(index: int):
-    payload = _load_simulation_rules_payload()
-    rules = payload.get("rules", [])
-    if index < 0 or index >= len(rules):
-        raise HTTPException(status_code=404, detail=f"Index '{index}' out of range")
-    deleted = rules.pop(index)
-    _save_simulation_rules(rules)
-    return {"message": f"Simulation rule at index '{index}' deleted successfully", "deleted_rule": deleted}
 
 @router.post("")
-async def simulate(simInfo: SimulationInfo):
-    print(f"Received simulation request for {simInfo.attackType}")
-    print(f"App name: {simInfo.appName}")
+def simulate(simInfo: SimulationInfo):
+    """Trigger a real attack against the vuln-spring NodePort on the chosen cluster.
+
+    Migration is **not** triggered here anymore. Falco running on the cluster detects the
+    attack and posts an alert to /alert, which then consults config.json to decide
+    whether to migrate or just log the event.
+    """
+    print(f"Received simulation request for {simInfo.attackType} on cluster {simInfo.cluster}")
     app_name = (simInfo.appName or "").strip()
     attack_type = (simInfo.attackType or "").strip()
+    cluster = (simInfo.cluster or "").strip() or None
+    namespace = (simInfo.namespace or "").strip() or None
 
     if not app_name:
         raise HTTPException(status_code=400, detail="appName is required")
@@ -249,9 +176,14 @@ async def simulate(simInfo: SimulationInfo):
             detail=f"Simulation currently supports only apps starting with '{SUPPORTED_APP_PREFIX}'. Received '{app_name}'."
         )
 
+    falco_rule = ATTACK_FALCO_RULES[attack_type]
+    target_url, target_meta = _resolve_target_url(cluster)
+    resolved_namespace = namespace or target_meta.get("namespace")
+    pod_name = _find_running_pod(cluster, resolved_namespace, app_name) if cluster else None
+
     try:
         if attack_type == "reverse_shell":
-            reverse_shell(target_url, "10.0.0.180","4444")
+            reverse_shell(target_url, DEFAULT_REVERSE_SHELL_LISTENER_IP, DEFAULT_REVERSE_SHELL_LISTENER_PORT)
             simulation_message = "Reverse shell command executed"
         elif attack_type == "data_destruction":
             data_destruction(target_url)
@@ -260,13 +192,25 @@ async def simulate(simInfo: SimulationInfo):
             log_removal(target_url)
             simulation_message = "Log removal command executed"
 
-        migration_result = await _maybe_trigger_rule_based_migration(app_name, attack_type)
-        response = {"message": simulation_message}
-        if migration_result:
-            response["autoMigration"] = migration_result
-        else:
-            response["autoMigration"] = {"matched": False, "message": "No matching simulation rule found"}
-        return response
+        return {
+            "message": simulation_message,
+            "appName": app_name,
+            "attackType": attack_type,
+            "falcoRule": falco_rule,
+            "cluster": cluster,
+            "namespace": resolved_namespace,
+            "podName": pod_name,
+            "targetUrl": target_url,
+            "targetSource": target_meta.get("source"),
+            "detail": (
+                f"Attack '{attack_type}' executed against {target_url}"
+                + (f" (cluster '{cluster}'" if cluster else "")
+                + (f", namespace '{resolved_namespace}'" if resolved_namespace else "")
+                + (f", pod '{pod_name}'" if pod_name else "")
+                + (")" if cluster else "")
+                + f". Falco should now raise rule '{falco_rule}'; any migration is handled "
+                + "by /alert according to config.json."
+            ),
+        }
     except requests_exceptions.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"Simulation target unreachable: {exc}") from exc
-    
+        raise HTTPException(status_code=502, detail=f"Simulation target unreachable at {target_url}: {exc}") from exc

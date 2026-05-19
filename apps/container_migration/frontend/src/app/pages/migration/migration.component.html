@@ -40,8 +40,8 @@
                 </div>
                 <div class="grid formgrid mb-3 mt-5">
                     <p-inputSwitch [(ngModel)]="cleanupIncompatibleMounts" class="mr-5 ml-3" (onChange)="onCleanupIncompatibleMountsChange()"></p-inputSwitch>
-                    <p pTooltip="Before checkpoint, run a daemonset on every source-cluster node that unmounts container mounts (e.g. /sys/devices/virtual/powercap) which the destination (PNET / SEV-SNP) cannot provide. Auto-defaults to ON for PNET / SEV-SNP destinations." tooltipPosition="top">
-                        Cleanup incompatible mounts before checkpoint
+                    <p pTooltip="Before checkpoint, run the source mount cleanup and then normalize checkpoint metadata so known non-portable CRIU proc/sys mount entries are not restored on incompatible destinations. Auto-defaults to ON for PNET / SEV-SNP destinations." tooltipPosition="top">
+                        Cleanup incompatible mounts and normalize checkpoint
                         @if (isHeterogeneousTarget(selectedTarget) && !cleanupIncompatibleMountsTouched) {
                             <small class="ml-2 text-color-secondary">(default for {{ selectedTarget }})</small>
                         }
@@ -177,70 +177,21 @@
 
     <div class="col-12 xl:col-6 gap-2">
         <div class="card migration-monitor-card">
-            <div class="monitor-header">
-                <h5>Migration monitor</h5>
-                <span class="status-badge" [ngClass]="activeMigrationStatus">{{ getStatusLabel() }}</span>
-            </div>
-
-            @if(activeMigrationStatus === 'running' || activeMigrationStatus === 'started') {
-                <div class="monitor-row">
-                    <p-progressSpinner styleClass="w-2rem h-2rem" strokeWidth="6"></p-progressSpinner>
-                    <span>Migration is running...</span>
-                </div>
-            }
-
-            <div class="status-detail">
-                {{ statusDetail || 'No migration started yet.' }}
-            </div>
-            @if(statusUpdatedAt) {
-                <small class="text-color-secondary">Last update: {{ statusUpdatedAt | date:'mediumTime' }}</small>
-            }
-            @if(statusTargetNode) {
-                <div><small class="text-color-secondary">Target node: {{ statusTargetNode }}</small></div>
-            }
-
-            @if(downtimeMs != null) {
-                <div class="downtime-summary">
-                    <span class="downtime-label">Downtime</span>
-                    <span class="downtime-value" [pTooltip]="'From stopping the source workload after checkpoint until the restore pod reports Running.'" tooltipPosition="top">{{ formatDuration(downtimeMs) }}</span>
-                </div>
-            }
-
-            <div class="step-list">
-                <div class="step-list-header">
-                    <span>Pipeline stage</span>
-                    <span class="step-h-duration">Duration</span>
-                    <span class="step-h-status">Status</span>
-                </div>
-                @for(stage of stageStatuses; track stage.key; let i = $index) {
-                    <div class="step-item" [ngClass]="'stage-' + stage.status">
-                        <span class="step-number">{{ i + 1 }}.</span>
-                        <span class="step-label">{{ stage.label }}</span>
-                        <span class="step-duration">{{ formatStageTiming(stage, timerUiTick) }}</span>
-                        <span class="step-status">{{ stage.status }}</span>
-                    </div>
-                }
-            </div>
-            @if(statusLogPath) {
-                <small class="text-color-secondary">Log path: {{ statusLogPath }}</small>
-            }
-
-            <div class="log-output mt-3">
-                <div class="log-title">Live migration logs</div>
-                @if(liveLogLines.length > 0) {
-                    <pre>{{ liveLogLines.join('\n') }}</pre>
-                } @else {
-                    <pre>No migration logs yet.</pre>
-                }
-            </div>
-            <div class="log-output mt-3">
-                <div class="log-title">Latest Kubernetes events (target pod)</div>
-                @if(statusK8sEvents.length > 0) {
-                    <pre>{{ statusK8sEvents.join('\n') }}</pre>
-                } @else {
-                    <pre>No Kubernetes events captured yet.</pre>
-                }
-            </div>
+            <app-migration-pipeline-monitor
+                title="Migration monitor"
+                [statusLabel]="getStatusLabel()"
+                [statusBadgeClass]="activeMigrationStatus"
+                [showSpinner]="activeMigrationStatus === 'running' || activeMigrationStatus === 'started'"
+                [statusDetail]="statusDetail"
+                [statusUpdatedAt]="statusUpdatedAt"
+                [statusTargetNode]="statusTargetNode"
+                [downtimeMs]="downtimeMs"
+                [statusLogPath]="statusLogPath"
+                [liveLogLines]="liveLogLines"
+                [statusK8sEvents]="statusK8sEvents"
+                [stageStatuses]="stageStatuses"
+                [timerActive]="activeMigrationStatus === 'running' || activeMigrationStatus === 'started'"
+            />
         </div>
 
         <div class="card mt-3">

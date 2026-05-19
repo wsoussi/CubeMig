@@ -2,6 +2,8 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, List
 
 class OutputFields(BaseModel):
+    model_config = {"populate_by_name": True}
+
     container_id: Optional[str] = Field(None, alias="container.id")
     container_image_repository: Optional[str] = Field(None, alias="container.image.repository")
     container_image_tag: Optional[str] = Field(None, alias="container.image.tag")
@@ -21,11 +23,13 @@ class OutputFields(BaseModel):
     user_uid: Optional[int] = Field(None, alias="user.uid")
 
 class Alert(BaseModel):
-    hostname: Optional[str]
-    output: Optional[str]
-    output_fields: Optional[OutputFields]
-    priority: Optional[str]
-    rule: Optional[str]
-    source: Optional[str]
-    tags: Optional[List[str]]
-    time: Optional[str]
+    hostname: Optional[str] = None
+    output: Optional[str] = None
+    output_fields: Optional[OutputFields] = None
+    priority: Optional[str] = None
+    rule: Optional[str] = None
+    source: Optional[str] = None
+    tags: Optional[List[str]] = None
+    time: Optional[str] = None
+
+    model_config = {"populate_by_name": True}

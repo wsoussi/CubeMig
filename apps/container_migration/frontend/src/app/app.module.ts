@@ -11,6 +11,8 @@ import { ConfigComponent } from './pages/config/config.component';
 import { LogsComponent } from './pages/logs/logs.component';
 import { SimulationComponent } from './pages/simulation/simulation.component';
 import { TeeEncapsulationComponent } from './pages/tee-encapsulation/tee-encapsulation.component';
+import { EvaluationComponent } from './pages/evaluation/evaluation.component';
+import { MigrationPipelineMonitorComponent } from './shared/migration-pipeline-monitor/migration-pipeline-monitor.component';
 import { CommonModule } from '@angular/common';
 import { TableModule } from 'primeng/table';
 import { ButtonModule } from 'primeng/button';
@@ -40,7 +42,9 @@ import { MarkdownModule } from 'ngx-markdown';
     ConfigComponent,
     LogsComponent,
     SimulationComponent,
-    TeeEncapsulationComponent
+    TeeEncapsulationComponent,
+    EvaluationComponent,
+    MigrationPipelineMonitorComponent
   ],
   imports: [
     CommonModule,

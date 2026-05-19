@@ -1,0 +1,249 @@
+<div class="grid">
+    <div class="col-12">
+        <div class="card">
+            <h5>Evaluation starten</h5>
+            <p class="text-color-secondary mb-3">
+                Startet <code>run_eval_migration.sh</code> mit <code>single-migration.sh</code> im Hintergrund — dieselbe Pipeline wie in der Konsole, inkl. k8s/Istio/wg0-Metriken und Checkpoint-Metadaten.
+            </p>
+
+            <div class="p-formgrid grid">
+                <div class="field col-12 md:col-6">
+                    <label class="block mb-2">Source cluster</label>
+                    <p-dropdown [options]="clusterOptions" [(ngModel)]="formSource" (onChange)="onSourceChange()" placeholder="Source" [style]="{'width':'100%'}"></p-dropdown>
+                </div>
+                <div class="field col-12 md:col-6">
+                    <label class="block mb-2">Destination cluster</label>
+                    <p-dropdown [options]="clusterOptions" [(ngModel)]="formDest" (onChange)="onDestChange()" placeholder="Destination" [style]="{'width':'100%'}"></p-dropdown>
+                </div>
+                <div class="field col-12 md:col-4">
+                    <label class="block mb-2">Namespace</label>
+                    <p-dropdown [options]="namespaceOptions" [(ngModel)]="formNamespace" (onChange)="onNamespaceChange()" [style]="{'width':'100%'}"></p-dropdown>
+                </div>
+                <div class="field col-12 md:col-4">
+                    <label class="block mb-2">Workload</label>
+                    <p-dropdown [options]="workloadOptions" [(ngModel)]="formWorkload" (onChange)="onWorkloadChange()" [style]="{'width':'100%'}"></p-dropdown>
+                </div>
+                <div class="field col-12 md:col-4">
+                    <label class="block mb-2">Pod</label>
+                    <p-dropdown [options]="podOptions" [(ngModel)]="formPod" placeholder="Running pod on source" [style]="{'width':'100%'}"></p-dropdown>
+                </div>
+                <div class="field col-12 md:col-3">
+                    <label class="block mb-2">Load (RPS)</label>
+                    <input pInputText type="number" min="0" [(ngModel)]="formLoadRps" class="w-full" />
+                </div>
+                <div class="field col-12 md:col-3">
+                    <label class="block mb-2">Concurrency</label>
+                    <input pInputText type="number" min="1" [(ngModel)]="formConcurrency" class="w-full" />
+                </div>
+                <div class="field col-12 md:col-3">
+                    <label class="block mb-2">Trigger</label>
+                    <p-dropdown [options]="triggerOptions" [(ngModel)]="formTrigger" [style]="{'width':'100%'}"></p-dropdown>
+                </div>
+                <div class="field col-12 md:col-3">
+                    <label class="block mb-2">Run ID (optional)</label>
+                    <input pInputText type="text" [(ngModel)]="formRunId" placeholder="auto-generated" class="w-full" />
+                </div>
+            </div>
+
+            <div class="mb-3">
+                <label class="block mb-2">Registry (host:port)</label>
+                <input pInputText type="text" [(ngModel)]="formRegistry" class="w-full" />
+            </div>
+
+            <div class="grid formgrid mb-3">
+                <div class="col-12 md:col-6 flex align-items-center gap-2">
+                    <p-inputSwitch [(ngModel)]="formSkipCpuCompatCheck"></p-inputSwitch>
+                    <span>Skip CRIU CPU compatibility check</span>
+                </div>
+                <div class="col-12 md:col-6 flex align-items-center gap-2">
+                    <p-inputSwitch [(ngModel)]="formCleanupIncompatibleMounts" (onChange)="onCleanupChange()"></p-inputSwitch>
+                    <span>Cleanup incompatible mounts and normalize checkpoint</span>
+                </div>
+                <div class="col-12 md:col-6 flex align-items-center gap-2">
+                    <p-inputSwitch [(ngModel)]="formDisableIstioSidecar"></p-inputSwitch>
+                    <span>Disable Istio sidecar on restore</span>
+                </div>
+            </div>
+
+            @if (formSource.toLowerCase().includes('pnet') || formDest.toLowerCase().includes('pnet')) {
+                <p-message severity="info" text="PNET-Lauf: wg0-Statistiken werden automatisch vor/nach der Migration erfasst."></p-message>
+            }
+
+            <div class="flex flex-wrap gap-2 mt-3" style="display: flex; justify-content: flex-end;">
+                <button pButton label="Run-ID vorschlagen" class="p-button-outlined p-button-secondary" (click)="suggestRunId()" [disabled]="!formSource || !formDest"></button>
+                <button pButton label="Evaluation starten" icon="pi pi-play" (click)="startEvaluationRun()" [loading]="startingRun" [disabled]="!canStartRun()"></button>
+            </div>
+
+            @if (activeRunId) {
+                <div class="eval-active-run mt-3" [class.eval-active-run-done]="activeRunStatus === 'completed' || activeRunStatus === 'failed'">
+                    <p class="mb-2 text-color-secondary">
+                        <strong>{{ activeRunId }}</strong>
+                        @if (activeRunExitCode !== null) {
+                            <span> — exit {{ activeRunExitCode }}</span>
+                        }
+                    </p>
+                    <app-migration-pipeline-monitor
+                        title="Migration pipeline"
+                        [statusLabel]="activeMonitorStatusLabel()"
+                        [statusBadgeClass]="activeMonitorStatusLabel()"
+                        [showSpinner]="activeRunStatus === 'running'"
+                        [statusDetail]="activeStatusDetail"
+                        [statusUpdatedAt]="activeStatusUpdatedAt"
+                        [statusTargetNode]="activeStatusTargetNode"
+                        [downtimeMs]="activeDowntimeMs"
+                        [statusLogPath]="activeStatusLogPath"
+                        [liveLogLines]="activeLogLines"
+                        [statusK8sEvents]="activeStatusK8sEvents"
+                        [stageStatuses]="activeStageStatuses"
+                        [timerActive]="activeRunStatus === 'running'"
+                    />
+                </div>
+            }
+        </div>
+    </div>
+
+    <div class="col-12">
+        <div class="card">
+            <div class="flex align-items-center justify-content-between mb-3" style="display: flex; align-items: center; justify-content: space-between;">
+                <div>
+                    <h5 class="mb-1">Evaluation runs</h5>
+                    <p class="text-color-secondary mb-0">Alle abgeschlossenen und laufenden Runs (CSV-Index).</p>
+                    @if (outRoot) {
+                        <p class="text-color-secondary mb-0"><small>Out root: <code>{{ outRoot }}</code></small></p>
+                    }
+                </div>
+                <button pButton label="Reload" icon="pi pi-refresh" class="p-button-outlined" (click)="refreshRuns()" [loading]="loadingRuns"></button>
+            </div>
+
+            @if (loadError) {
+                <p-message severity="warn" [text]="loadError"></p-message>
+            }
+
+            <p-table [value]="runs" [loading]="loadingRuns" [paginator]="runs.length > 10" [rows]="10" responsiveLayout="scroll">
+                <ng-template pTemplate="header">
+                    <tr>
+                        <th>Date (UTC)</th>
+                        <th>Run id</th>
+                        <th>Source -> Dest</th>
+                        <th>Workload</th>
+                        <th>Pod</th>
+                        <th>Load</th>
+                        <th>Trigger</th>
+                        <th>Exit</th>
+                        <th></th>
+                    </tr>
+                </ng-template>
+                <ng-template pTemplate="body" let-run>
+                    <tr [class.eval-row-selected]="selectedRun?.run_id === run.run_id && selectedRun?.date === run.date">
+                        <td>{{ run.date || '—' }}</td>
+                        <td><code>{{ run.run_id }}</code></td>
+                        <td>
+                            <code>{{ run.source }}</code> -> <code>{{ run.dest }}</code>
+                            @if (wgInvolved(run)) {
+                                <span class="ml-2" pTooltip="wg0 stats collected"><i class="pi pi-link"></i></span>
+                            }
+                        </td>
+                        <td>{{ run.workload }}</td>
+                        <td><code>{{ run.pod }}</code></td>
+                        <td>{{ run.load_rps }} / c={{ run.concurrency }}</td>
+                        <td>{{ run.trigger }}</td>
+                        <td>
+                            <span class="eval-exit"
+                                  [class.eval-exit-ok]="exitCodeSeverity(run.exit_code) === 'success'"
+                                  [class.eval-exit-fail]="exitCodeSeverity(run.exit_code) === 'danger'"
+                                  [class.eval-exit-pending]="exitCodeSeverity(run.exit_code) === 'info'">
+                                {{ run.exit_code }}
+                            </span>
+                        </td>
+                        <td>
+                            <button pButton icon="pi pi-search" class="p-button-text p-button-sm" (click)="selectRun(run)"></button>
+                        </td>
+                    </tr>
+                </ng-template>
+                <ng-template pTemplate="emptymessage">
+                    <tr>
+                        <td colspan="9" class="text-color-secondary">Noch keine Runs — oben „Evaluation starten“ verwenden.</td>
+                    </tr>
+                </ng-template>
+            </p-table>
+        </div>
+    </div>
+
+    <div class="col-12 xl:col-6">
+        <div class="card">
+            <h5>Run details</h5>
+            @if (!selectedRun) {
+                <p class="text-color-secondary">Run in der Tabelle auswählen.</p>
+            }
+            @if (selectedRun) {
+                <p class="mb-2"><strong>{{ selectedRun.run_id }}</strong> <span class="text-color-secondary">({{ selectedRun.date }})</span></p>
+                @if (loadingDetail) {
+                    <p class="text-color-secondary"><i class="pi pi-spin pi-spinner mr-2"></i>Loading…</p>
+                }
+                <app-migration-pipeline-monitor
+                    class="eval-selected-monitor mb-3"
+                    title="Migration pipeline"
+                    [statusLabel]="selectedMonitorStatusLabel()"
+                    [statusBadgeClass]="selectedMonitorStatusLabel()"
+                    [showSpinner]="false"
+                    [statusDetail]="selectedStatusDetail"
+                    [statusUpdatedAt]="selectedStatusUpdatedAt"
+                    [statusTargetNode]="selectedStatusTargetNode"
+                    [downtimeMs]="selectedDowntimeMs"
+                    [statusLogPath]="selectedStatusLogPath"
+                    [liveLogLines]="selectedLogLines"
+                    [statusK8sEvents]="selectedStatusK8sEvents"
+                    [stageStatuses]="selectedStageStatuses"
+                    [timerActive]="false"
+                />
+                @if (selectedDetail?.metadata) {
+                    <table class="eval-metadata-table">
+                        @for (entry of metadataEntries(); track entry.key) {
+                            <tr>
+                                <td class="eval-metadata-key">{{ entry.key }}</td>
+                                <td><code>{{ entry.value }}</code></td>
+                            </tr>
+                        }
+                    </table>
+                }
+                @if (selectedDetail?.artifacts?.length) {
+                    <h6 class="mt-3">Artifacts</h6>
+                    <ul class="eval-artifact-list">
+                        @for (artifact of selectedDetail?.artifacts; track artifact.name) {
+                            <li>
+                                <button pButton type="button" [label]="artifact.name" class="p-button-text p-button-sm eval-artifact-button"
+                                        [class.eval-artifact-active]="selectedArtifactName === artifact.name"
+                                        (click)="viewArtifact(artifact.name)"></button>
+                                <small class="text-color-secondary ml-2">{{ formatBytes(artifact.size_bytes) }}</small>
+                            </li>
+                        }
+                    </ul>
+                }
+            }
+        </div>
+    </div>
+
+    <div class="col-12 xl:col-6">
+        <div class="card">
+            <h5>Artifact viewer</h5>
+            @if (!selectedArtifactName) {
+                <p class="text-color-secondary">Artifact links auswählen.</p>
+            }
+            @if (selectedArtifactName) {
+                <p class="mb-2">
+                    <code>{{ selectedArtifactName }}</code>
+                    @if (selectedArtifactTruncated) {
+                        <small class="ml-2 eval-warning">truncated</small>
+                    }
+                </p>
+                @if (loadingFile) {
+                    <p class="text-color-secondary"><i class="pi pi-spin pi-spinner"></i></p>
+                } @else {
+                    <pre class="eval-file-view">{{ selectedArtifactContent }}</pre>
+                }
+            }
+        </div>
+    </div>
+
+    <p-toast key="tst"></p-toast>
+</div>

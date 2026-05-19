@@ -2,21 +2,75 @@
     <div class="col-12 md:col-6 gap-2">
         <div class="card">
             <h5>Attack simulation</h5>
-            <p>Choose the target app and the attack type</p>
-            <p>Only apps vulnerable to the configured backend simulation target will be affected.</p>  
+            <p>Pick the cluster where the vulnerable app runs, choose the target app and an attack type. The attack is executed against the running pod — Falco then detects it and decides (based on the active rules) whether to migrate or just log the event.</p>
+
             <div class="p-formgrid grid">
-                <div class="field col">
-                    <p-dropdown [options]="targetPod" [(ngModel)]="selectedApp" placeholder="Select the target application" [style]="{'width': '100%'}"></p-dropdown>
-                </div>
-                <div class="field col">
-                    <p-dropdown [options]="attackType" [(ngModel)]="selectedAttack" placeholder="Select the attack type" [style]="{'width': '100%'}"></p-dropdown>    
+                <div class="field col-12">
+                    <label class="block mb-2">Source cluster</label>
+                    <p-dropdown
+                        [options]="attackClusterSelection"
+                        [(ngModel)]="selectedAttackCluster"
+                        (onChange)="onAttackClusterChange()"
+                        placeholder="Select the cluster running the target app"
+                        [style]="{'width': '100%'}">
+                    </p-dropdown>
                 </div>
             </div>
 
+            <div class="p-formgrid grid">
+                <div class="field col">
+                    <p-dropdown
+                        [options]="targetPod"
+                        [(ngModel)]="selectedApp"
+                        [placeholder]="podsLoading ? 'Loading vuln-spring apps…' : (targetPod.length ? 'Select the target application' : 'No vuln-spring app found on cluster')"
+                        [disabled]="!selectedAttackCluster || podsLoading"
+                        [style]="{'width': '100%'}">
+                    </p-dropdown>
+                </div>
+                <div class="field col">
+                    <p-dropdown [options]="attackType" [(ngModel)]="selectedAttack" placeholder="Select the attack type" [style]="{'width': '100%'}"></p-dropdown>
+                </div>
+            </div>
+
+            @if(expectedFalcoRule) {
+                <div class="expected-rule-hint mb-3">
+                    <i class="pi pi-shield mr-2"></i>
+                    <span>This attack will trigger Falco rule:</span>
+                    <code class="ml-2">{{ expectedFalcoRule }}</code>
+                </div>
+            }
+
             <div class="flex flex-wrap gap-2" style="display: flex; justify-content: flex-end;">
                 <button pButton label="Reset" (click)="reset()" class="p-button-outlined p-button-secondary"></button>
-                <button pButton label="Attack" (click)="simulateAttack()" [loading]="loading" [disabled]="!selectedApp || !selectedAttack || loading"></button>
+                <button pButton label="Attack" (click)="simulateAttack()" [loading]="loading" [disabled]="!selectedAttackCluster || !selectedApp || !selectedAttack || loading"></button>
             </div>
+
+            @if(lastTriggeredFalcoRule) {
+                <div class="last-attack mt-3">
+                    <div class="last-attack-header">
+                        <i class="pi pi-bolt mr-2"></i>
+                        <strong>Last attack triggered</strong>
+                        @if(lastTriggeredAt) {
+                            <small class="text-color-secondary ml-2">{{ lastTriggeredAt | date:'mediumTime' }}</small>
+                        }
+                    </div>
+                    <div class="last-attack-body">
+                        <div><span class="label">Expected Falco rule:</span> <code>{{ lastTriggeredFalcoRule }}</code></div>
+                        @if(lastTriggeredTargetUrl) {
+                            <div><span class="label">Target URL:</span> <code>{{ lastTriggeredTargetUrl }}</code></div>
+                        }
+                        @if(lastTriggeredCluster) {
+                            <div><span class="label">Cluster:</span> <code>{{ lastTriggeredCluster }}</code></div>
+                        }
+                        @if(lastTriggeredPodName) {
+                            <div><span class="label">Pod:</span> <code>{{ lastTriggeredPodName }}</code></div>
+                        }
+                        @if(lastTriggeredDetail) {
+                            <p class="text-color-secondary mt-2">{{ lastTriggeredDetail }}</p>
+                        }
+                    </div>
+                </div>
+            }
         </div>
 
         <div class="card mt-3">
@@ -41,159 +95,41 @@
     <div class="col-12 md:col-6 gap-2">
         <div class="card">
             <div class="mb-3" style="display: flex; align-items: center; justify-content: space-between;">
-                <h5 style="margin: 0;">Simulation Rules</h5>
-                <button pButton label="Add rule" (click)="showRuleDialog()"></button>
+                <h5 style="margin: 0;">Active Falco rules</h5>
+                <button pButton label="Reload" icon="pi pi-refresh" class="p-button-outlined" (click)="loadConfigRules()" [loading]="rulesLoading"></button>
             </div>
-            <p>Rules decide if an attack simulation auto-triggers migration from source to destination cluster.</p>
-            <p-table [value]="simulationRules" [loading]="rulesLoading">
+            <p>These are the rules configured in <code>config.json</code>. When Falco raises an alert for one of these rule names on a matching source cluster, the configured action (migrate / log) is performed.</p>
+            @if(expectedFalcoRule) {
+                <p class="text-color-secondary mb-2">
+                    <i class="pi pi-info-circle mr-1"></i>
+                    The selected attack maps to Falco rule <code>{{ expectedFalcoRule }}</code>@if(selectedAttackCluster) { on cluster <code>{{ selectedAttackCluster }}</code> }. Highlighted rows below will react when Falco reports it.
+                </p>
+            }
+            <p-table [value]="configRules" [loading]="rulesLoading">
                 <ng-template pTemplate="header">
                     <tr>
-                        <th>Name</th>
-                        <th>Pattern</th>
-                        <th>Attack types</th>
-                        <th>Source</th>
-                        <th>Target</th>
-                        <th>Namespace</th>
-                        <th>Enabled</th>
-                        <th style="width: 7rem"></th>
+                        <th>Falco rule</th>
+                        <th>Source cluster</th>
+                        <th>Action</th>
+                        <th>Target cluster</th>
                     </tr>
                 </ng-template>
-                <ng-template pTemplate="body" let-rule let-rowIndex="rowIndex">
+                <ng-template pTemplate="body" let-rule>
+                    <tr [ngClass]="isRuleMatchingSelectedAttack(rule) ? 'rule-match-row' : ''">
+                        <td>{{ rule.rule }}</td>
+                        <td>{{ rule.cluster }}</td>
+                        <td>{{ rule.action }}</td>
+                        <td>{{ rule.targetCluster || '—' }}</td>
+                    </tr>
+                </ng-template>
+                <ng-template pTemplate="emptymessage">
                     <tr>
-                        <td>{{ rule.name }}</td>
-                        <td>{{ rule.appNamePattern }}</td>
-                        <td>{{ (rule.attackTypes || []).length ? rule.attackTypes.join(', ') : 'all' }}</td>
-                        <td>{{ rule.sourceCluster }}</td>
-                        <td>{{ rule.targetCluster }}</td>
-                        <td>{{ rule.namespace }}</td>
-                        <td>{{ rule.enabled !== false ? 'yes' : 'no' }}</td>
-                        <td>
-                            <button pButton type="button" icon="pi pi-pencil" (click)="editRuleAt(rowIndex)" class="p-button-rounded p-button-outlined mr-1" pTooltip="Edit" tooltipPosition="top"></button>
-                            <button pButton type="button" icon="pi pi-trash" (click)="deleteSimulationRule(rowIndex)" class="p-button-rounded p-button-outlined" pTooltip="Delete" tooltipPosition="top"></button>
-                        </td>
+                        <td colspan="4" class="text-color-secondary">No rules configured in config.json. Manage them on the Configuration page.</td>
                     </tr>
                 </ng-template>
             </p-table>
         </div>
     </div>
-
-    <div class="col-12">
-        <div class="card migration-monitor-card">
-            <div class="monitor-header">
-                <h5>Migration monitor</h5>
-                <span class="status-badge" [ngClass]="activeMigrationStatus">{{ getStatusLabel() }}</span>
-            </div>
-
-            @if(activeMigrationStatus === 'running' || activeMigrationStatus === 'started') {
-                <div class="monitor-row">
-                    <p-progressSpinner styleClass="w-2rem h-2rem" strokeWidth="6"></p-progressSpinner>
-                    <span>Migration is running...</span>
-                </div>
-            }
-
-            <div class="status-detail">
-                {{ statusDetail || 'No migration started yet.' }}
-            </div>
-            @if(statusUpdatedAt) {
-                <small class="text-color-secondary">Last update: {{ statusUpdatedAt | date:'mediumTime' }}</small>
-            }
-            @if(statusTargetNode) {
-                <div><small class="text-color-secondary">Target node: {{ statusTargetNode }}</small></div>
-            }
-            @if(downtimeMs != null) {
-                <div class="downtime-summary">
-                    <span class="downtime-label">Downtime</span>
-                    <span class="downtime-value" [pTooltip]="'From stopping the source workload after checkpoint until the restore pod reports Running.'" tooltipPosition="top">{{ formatDuration(downtimeMs) }}</span>
-                </div>
-            }
-            <div class="step-list mt-3">
-                <div class="step-list-header">
-                    <span>Pipeline stage</span>
-                    <span class="step-h-duration">Duration</span>
-                    <span class="step-h-status">Status</span>
-                </div>
-                @for(stage of stageStatuses; track stage.key; let i = $index) {
-                    <div class="step-item" [ngClass]="'stage-' + stage.status">
-                        <span class="step-number">{{ i + 1 }}.</span>
-                        <span class="step-label">{{ stage.label }}</span>
-                        <span class="step-duration">{{ formatStageTiming(stage, timerUiTick) }}</span>
-                        <span class="step-status">{{ stage.status }}</span>
-                    </div>
-                }
-            </div>
-            @if(statusLogPath) {
-                <small class="text-color-secondary">Log path: {{ statusLogPath }}</small>
-            }
-        </div>
-    </div>
-
-    <p-dialog [header]="ruleDialogHeader" [(visible)]="isRuleDialogVisible" [modal]="true" showEffect="fade" [style]="{width: '45vw'}" [breakpoints]="{'960px': '75vw'}">
-        <div class="field mb-3">
-            <label class="block mb-2">Rule name</label>
-            <input pInputText [(ngModel)]="newRuleName" placeholder="e.g. vuln-spring cluster1 to cluster2" class="w-full" />
-        </div>
-        <div class="grid formgrid mb-3">
-            <p-inputSwitch [(ngModel)]="newRuleEnabled" class="mr-3 ml-3"></p-inputSwitch>
-            <p>Rule enabled</p>
-        </div>
-        <div class="field mb-3">
-            <label class="block mb-2">App name pattern</label>
-            <input pInputText [(ngModel)]="newRulePattern" placeholder="e.g. vuln-spring*" class="w-full" />
-        </div>
-        <div class="field mb-3">
-            <label class="block mb-2">Attack scenarios</label>
-            <p-multiSelect
-                [options]="attackScenarioSelection"
-                [(ngModel)]="newRuleAttackTypes"
-                defaultLabel="Select attack scenarios (empty = all)"
-                [style]="{'width': '100%'}">
-            </p-multiSelect>
-        </div>
-        <div class="field mb-3">
-            <label class="block mb-2">Source cluster</label>
-            <p-dropdown [options]="clusterSelection" [(ngModel)]="newRuleSourceCluster" (onChange)="onNewRuleSourceClusterChange()" placeholder="Select source cluster" [style]="{'width': '100%'}"></p-dropdown>
-        </div>
-        <div class="field mb-3">
-            <label class="block mb-2">Target cluster</label>
-            <p-dropdown [options]="targetClusterSelection" [(ngModel)]="newRuleTargetCluster" placeholder="Select target cluster" [style]="{'width': '100%'}"></p-dropdown>
-        </div>
-        <div class="field mb-3">
-            <label class="block mb-2">Namespace</label>
-            <input pInputText [(ngModel)]="newRuleNamespace" placeholder="default" class="w-full" />
-        </div>
-        <div class="field mb-3">
-            <label class="block mb-2">Registry address (optional)</label>
-            <input pInputText [(ngModel)]="newRuleRegistryAddress" placeholder="160.85.255.146:5000" class="w-full" />
-        </div>
-
-        <div class="grid formgrid mb-2">
-            <p-inputSwitch [(ngModel)]="newRuleForensicAnalysis" class="mr-3 ml-3"></p-inputSwitch>
-            <p>Forensic analysis</p>
-        </div>
-        <div class="grid formgrid mb-2">
-            <p-inputSwitch [(ngModel)]="newRuleAISuggestion" class="mr-3 ml-3"></p-inputSwitch>
-            <p>AI suggestion</p>
-        </div>
-        <div class="grid formgrid mb-2">
-            <p-inputSwitch [(ngModel)]="newRuleDisableIstioSidecar" class="mr-3 ml-3"></p-inputSwitch>
-            <p>Disable Istio sidecar</p>
-        </div>
-        <div class="grid formgrid mb-2">
-            <p-inputSwitch [(ngModel)]="newRuleSkipCpuCompatCheck" class="mr-3 ml-3"></p-inputSwitch>
-            <p>Skip CPU compatibility check</p>
-        </div>
-        <div class="grid formgrid mb-2">
-            <p-inputSwitch [(ngModel)]="newRuleCleanupIncompatibleMounts" class="mr-3 ml-3"></p-inputSwitch>
-            <p>Cleanup incompatible mounts</p>
-        </div>
-
-        <ng-template pTemplate="footer">
-            <div class="flex flex-wrap gap-2" style="display: flex; justify-content: flex-end;">
-                <button pButton label="Cancel" (click)="cancelRuleDialog()" class="p-button-outlined p-button-secondary"></button>
-                <button pButton [label]="saveRuleButtonLabel" (click)="saveNewRule()" icon="pi pi-save"></button>
-            </div>
-        </ng-template>
-    </p-dialog>
 
     <p-toast key="tst"></p-toast>
 </div>

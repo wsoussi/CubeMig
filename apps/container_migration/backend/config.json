@@ -5,8 +5,12 @@
             "cluster": "cluster1",
             "action": "migrate",
             "targetCluster": "cluster2",
-            "forensic_analysis": true,
-            "AI_suggestion": true
+            "forensic_analysis": false,
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
         },
         {
             "rule": "Drop and execute new binary in container",
@@ -14,31 +18,119 @@
             "action": "log",
             "targetCluster": null,
             "forensic_analysis": false,
-            "AI_suggestion": false
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
         },
         {
             "rule": "Clear Log Activities",
             "cluster": "cluster1",
             "action": "migrate",
             "targetCluster": "cluster2",
-            "forensic_analysis": true,
-            "AI_suggestion": true
+            "forensic_analysis": false,
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
         },
         {
             "rule": "Redirect STDOUT/STDIN to Network Connection in Container",
             "cluster": "cluster1",
             "action": "migrate",
             "targetCluster": "cluster2",
-            "forensic_analysis": true,
-            "AI_suggestion": true
+            "forensic_analysis": false,
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
         },
         {
             "rule": "Remove Bulk Data from Disk",
             "cluster": "cluster1",
             "action": "migrate",
             "targetCluster": "cluster2",
-            "forensic_analysis": true,
-            "AI_suggestion": true
+            "forensic_analysis": false,
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
+        },
+        {
+            "rule": "Read sensitive file untrusted",
+            "cluster": "cluster-pnet",
+            "action": "migrate",
+            "targetCluster": "cluster-sev-snp",
+            "forensic_analysis": false,
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
+        },
+        {
+            "rule": "Drop and execute new binary in container",
+            "cluster": "cluster-pnet",
+            "action": "log",
+            "targetCluster": null,
+            "forensic_analysis": false,
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
+        },
+        {
+            "rule": "Clear Log Activities",
+            "cluster": "cluster-pnet",
+            "action": "migrate",
+            "targetCluster": "cluster-sev-snp",
+            "forensic_analysis": false,
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
+        },
+        {
+            "rule": "Redirect STDOUT/STDIN to Network Connection in Container",
+            "cluster": "cluster-pnet",
+            "action": "migrate",
+            "targetCluster": "cluster-sev-snp",
+            "forensic_analysis": false,
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
+        },
+        {
+            "rule": "Remove Bulk Data from Disk",
+            "cluster": "cluster-pnet",
+            "action": "migrate",
+            "targetCluster": "cluster-sev-snp",
+            "forensic_analysis": false,
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
+        },
+        {
+            "rule": "MMT Attack Candidate From Kafka",
+            "cluster": "cluster-pnet",
+            "action": "migrate",
+            "targetCluster": "cluster-sev-snp",
+            "forensic_analysis": false,
+            "AI_suggestion": false,
+            "registry_address": "160.85.255.146:5000",
+            "disable_istio_sidecar": false,
+            "skip_cpu_compat_check": true,
+            "cleanup_incompatible_mounts": false
         }
     ]
 }

@@ -11,6 +11,10 @@ cleanupIncompatibleMounts="${CLEANUP_INCOMPATIBLE_MOUNTS:-false}"
 enableCheckpointPrepull="${ENABLE_CHECKPOINT_PREPULL:-false}"
 preflightDestinationSetup="${PREFLIGHT_DESTINATION_SETUP:-true}"
 preflightClusterChecks="${PREFLIGHT_CLUSTER_CHECKS:-true}"
+normalizeCheckpointMounts="${NORMALIZE_CHECKPOINT_MOUNTS:-false}"
+normalizeCheckpointMounts_cli_specified=false
+skipCheckpointNormalization_explicit=false
+checkpointNormalizeMounts="${CHECKPOINT_NORMALIZE_MOUNTS:-}"
 criuCpuCapMode="${CRIU_CPU_CAP:-cpu}"
 
 # Cluster parameters must be provided explicitly
@@ -28,7 +32,7 @@ while [[ "$#" -gt 0 ]]; do
     case $1 in
         -fa|--forensic-analysis) forensicAnalysis=true ;;
         -ai|--ai-suggestion) AISuggestion=true ;;
-        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] [--skip-cpu-compat-check] [--cleanup-incompatible-mounts] [--cpu-cap <cpu|fpu|ins|cpu,ins|all>] --"; echo "-- Env: MIGRATION_REGISTRY=<host:port> (default 160.85.255.146:5000; CLUSTER1_REGISTRY still accepted). PRE_CHECKPOINT_ISTIO_503=true|false (default true): inject HTTP 503 on routing-demo VS before checkpoint; cleared when switching to v2. CRIU_CPU_CAP=<mode> defaults to cpu. SKIP_CPU_COMPAT_CHECK=true|false skips the CRIU CPU compatibility validator pod. CLEANUP_INCOMPATIBLE_MOUNTS=true|false runs a daemonset that unmounts /sys/devices/virtual/powercap on every source-cluster node before the checkpoint (use for heterogeneous PNET / SEV-SNP destinations). --"; exit 0 ;;
+        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] [--skip-cpu-compat-check] [--cleanup-incompatible-mounts] [--skip-checkpoint-normalization] [--normalize-checkpoint-mounts] [--cpu-cap <cpu|fpu|ins|cpu,ins|all>] --"; echo "-- Env: MIGRATION_REGISTRY=<host:port> (default 160.85.255.146:5000; CLUSTER1_REGISTRY still accepted). PRE_CHECKPOINT_ISTIO_503=true|false (default true): inject HTTP 503 on routing-demo VS before checkpoint; cleared when switching to v2. CRIU_CPU_CAP=<mode> defaults to cpu. SKIP_CPU_COMPAT_CHECK=true|false skips the CRIU CPU compatibility validator pod. CLEANUP_INCOMPATIBLE_MOUNTS=true|false runs the source pre-checkpoint powercap cleanup and also enables checkpoint mount normalization unless --skip-checkpoint-normalization is passed. NORMALIZE_CHECKPOINT_MOUNTS=true|false (default false) can enable checkpoint normalization for direct CLI runs without cleanup. CHECKPOINT_NORMALIZE_MOUNTS=/path/a,/path/b overrides the Python normalizer's conservative bad-mount list. --"; exit 0 ;;
         --log-dir) 
             shift
             custom_log_dir=$1
@@ -58,6 +62,20 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         --cleanup-incompatible-mounts)
             cleanupIncompatibleMounts=true
+            if [[ "$skipCheckpointNormalization_explicit" != true ]]; then
+              normalizeCheckpointMounts=true
+              normalizeCheckpointMounts_cli_specified=true
+            fi
+            ;;
+        --skip-checkpoint-normalization)
+            normalizeCheckpointMounts=false
+            normalizeCheckpointMounts_cli_specified=true
+            skipCheckpointNormalization_explicit=true
+            ;;
+        --normalize-checkpoint-mounts)
+            normalizeCheckpointMounts=true
+            normalizeCheckpointMounts_cli_specified=true
+            skipCheckpointNormalization_explicit=false
             ;;
         --cpu-cap)
             shift
@@ -73,7 +91,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 if [ -z "$podName" ]; then
-    echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] [--skip-cpu-compat-check] [--cleanup-incompatible-mounts] [--cpu-cap <cpu|fpu|ins|cpu,ins|all>] --"
+    echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] [--skip-cpu-compat-check] [--cleanup-incompatible-mounts] [--skip-checkpoint-normalization] [--normalize-checkpoint-mounts] [--cpu-cap <cpu|fpu|ins|cpu,ins|all>] --"
     exit 1
 fi
 
@@ -95,6 +113,10 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
   # shellcheck source=/dev/null
   source "$SCRIPT_DIR/.env"
 fi
+if [[ "$normalizeCheckpointMounts_cli_specified" != true ]]; then
+  normalizeCheckpointMounts="${NORMALIZE_CHECKPOINT_MOUNTS:-$normalizeCheckpointMounts}"
+fi
+checkpointNormalizeMounts="${CHECKPOINT_NORMALIZE_MOUNTS:-$checkpointNormalizeMounts}"
 
 insecure_registry_setup_attempted=false
 criu_tcp_close_setup_attempted=false
@@ -102,6 +124,7 @@ criu_cpu_cap_setup_attempted=false
 incompatible_mounts_cleanup_done=false
 source_workload_stopped=false
 istio_pre_checkpoint_503_applied=false
+checkpointNormalizationTime=0
 
 # Function to log messages (UTC ISO8601 prefix enables stage/downtime timing in the API/UI)
 log() {
@@ -188,6 +211,12 @@ else
   cleanupIncompatibleMounts=false
 fi
 
+if [[ "$normalizeCheckpointMounts" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss])$ ]]; then
+  normalizeCheckpointMounts=true
+else
+  normalizeCheckpointMounts=false
+fi
+
 preCheckpointIstio503="${PRE_CHECKPOINT_ISTIO_503:-true}"
 if [[ "$preCheckpointIstio503" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss])$ ]]; then
   preCheckpointIstio503=true
@@ -231,6 +260,41 @@ sanitize_k8s_name() {
 # --validate=false avoids OpenAPI schema fetch (common failure: "failed to download openapi").
 KUBECTL_DEST_TIMEOUT="${KUBECTL_DEST_TIMEOUT:-120s}"
 KUBECTL_PROXY_PORT="${KUBECTL_PROXY_PORT:-8001}"
+# Curl client-side cap on the checkpoint POST. Must cover the time CRIU/CRI-O actually
+# needs to dump + write the checkpoint tar on the source node (e.g. when the checkpoint
+# storage is NFS and slow). Must be <= the kubelet's runtimeRequestTimeout on the source
+# node, otherwise the kubelet aborts the gRPC call to CRI-O before curl gives up.
+CHECKPOINT_HTTP_MAX_TIME="${CHECKPOINT_HTTP_MAX_TIME:-900}"
+
+# Stop any kubectl proxy (or other listener) on the given local port so we can bind a
+# proxy for the correct --source-cluster. Reusing a proxy left over from another migration
+# (e.g. cluster-pnet) causes immediate 404 "nodes \"worker2\" not found" on cluster1.
+stop_kubectl_proxy_on_port() {
+  local port="$1"
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "${port}/tcp" 2>/dev/null || true
+  elif command -v lsof >/dev/null 2>&1; then
+    local pids
+    pids=$(lsof -t -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+      # shellcheck disable=SC2086
+      kill $pids 2>/dev/null || true
+    fi
+  else
+    pkill -f "kubectl.*proxy.*--port=${port}" 2>/dev/null || true
+  fi
+  sleep 1
+}
+
+# True when the apiserver proxy on :port belongs to the migration source (node object exists).
+kubectl_proxy_serves_source_node() {
+  local port="$1"
+  local nodename="$2"
+  local code
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 \
+    "http://127.0.0.1:${port}/api/v1/nodes/${nodename}" 2>/dev/null || echo "000")
+  [[ "$code" == "200" ]]
+}
 
 kubectl_apply_dest() {
   local manifest="$1"
@@ -837,6 +901,7 @@ Total Dump Time: ${total_dump_time_ms} ms
 Checkpoint Creation: $checkpointTime ms
 Checkpoint Location: $latestCheckpointTime ms
 Permission Change: $permissionTime ms
+Checkpoint Normalization: $checkpointNormalizationTime ms
 Image Creation: $newImageTime ms
 Image Push: $pushImageTime ms
 Pod Ready: $podReadyTime ms
@@ -1067,10 +1132,16 @@ proxy_checkpoint_url="http://127.0.0.1:${proxy_port}${proxy_checkpoint_path}"
 KUBECTL_PROXY_PID=""
 started_kubectl_proxy=false
 
-if curl -sS --connect-timeout 2 --max-time 5 "$proxy_healthz_url" >/dev/null 2>&1; then
-  log "-- Reusing existing kubectl proxy on 127.0.0.1:${proxy_port} --"
+if curl -sS --connect-timeout 2 --max-time 5 "$proxy_healthz_url" >/dev/null 2>&1 \
+  && kubectl_proxy_serves_source_node "$proxy_port" "$nodename"; then
+  log "-- Reusing existing kubectl proxy on 127.0.0.1:${proxy_port} (source cluster ${sourceCluster}; node ${nodename} found) --"
 else
-  log "-- kubectl proxy on 127.0.0.1:${proxy_port} is not reachable; starting new proxy for source context ${sourceCluster} --"
+  if curl -sS --connect-timeout 2 --max-time 5 "$proxy_healthz_url" >/dev/null 2>&1; then
+    log "-- Existing kubectl proxy on 127.0.0.1:${proxy_port} is not for source cluster ${sourceCluster} (node ${nodename} not found via proxy API); restarting proxy --"
+    stop_kubectl_proxy_on_port "$proxy_port"
+  else
+    log "-- kubectl proxy on 127.0.0.1:${proxy_port} is not reachable; starting new proxy for source context ${sourceCluster} --"
+  fi
   kubectl --context "$sourceCluster" proxy --address=127.0.0.1 --port="$proxy_port" >>"$log_file" 2>&1 &
   KUBECTL_PROXY_PID=$!
   started_kubectl_proxy=true
@@ -1083,12 +1154,19 @@ else
     fi
     handle_error "Failed to start kubectl proxy on 127.0.0.1:${proxy_port} for source context ${sourceCluster}"
   fi
+  if ! kubectl_proxy_serves_source_node "$proxy_port" "$nodename"; then
+    if [[ "$started_kubectl_proxy" == true && -n "$KUBECTL_PROXY_PID" ]] && kill -0 "$KUBECTL_PROXY_PID" 2>/dev/null; then
+      kill "$KUBECTL_PROXY_PID" 2>/dev/null || true
+      wait "$KUBECTL_PROXY_PID" 2>/dev/null || true
+    fi
+    handle_error "kubectl proxy on 127.0.0.1:${proxy_port} started but node ${nodename} is not visible in source cluster ${sourceCluster}"
+  fi
 fi
 
-log "-- Calling checkpoint API via apiserver proxy path: ${proxy_checkpoint_path} --"
+log "-- Calling checkpoint API via apiserver proxy path: ${proxy_checkpoint_path} (curl --max-time=${CHECKPOINT_HTTP_MAX_TIME}s) --"
 checkpoint_http=$(curl -sS -X POST "$proxy_checkpoint_url" \
   --connect-timeout 10 \
-  --max-time 300 \
+  --max-time "$CHECKPOINT_HTTP_MAX_TIME" \
   -o "$_checkpoint_body_tmp" \
   -w '%{http_code}' \
   2>>"$log_file")
@@ -1215,20 +1293,85 @@ podDeletionTime=$(($(date +%s%3N) - $podDeletionStartTime))
 
 log "------------------------------------------------------------------"
 
+checkpointfile_for_image="$checkpointfile"
+normalized_checkpointfile="$log_dir/$(basename "${checkpointfile%.tar}").normalized.tar"
+checkpoint_normalization_log="$log_dir/checkpoint_normalization.log"
+if [[ -n "$checkpointNormalizeMounts" ]]; then
+  checkpoint_normalization_bad_mounts="$checkpointNormalizeMounts"
+else
+  checkpoint_normalization_bad_mounts="normalizer default list"
+fi
+
+if [[ "$normalizeCheckpointMounts" == true ]]; then
+  log "-- Checkpoint mount normalization enabled --"
+  log "-- Checkpoint normalization bad mount list: $checkpoint_normalization_bad_mounts --"
+  log "-- Checkpoint normalization input tar: $checkpointfile --"
+  log "-- Checkpoint normalization output tar: $normalized_checkpointfile --"
+  log "-- criu --version (migration host) --"
+  criu --version >>"$log_file" 2>&1 || true
+  log "-- crit --help (migration host) --"
+  crit --help >>"$log_file" 2>&1 || true
+
+  if ! command -v crit >/dev/null 2>&1; then
+    handle_error "Checkpoint normalization is enabled but crit is not installed. Install CRIU/crit 4.2 on podmanvm or set NORMALIZE_CHECKPOINT_MOUNTS=false."
+  fi
+
+  checkpoint_normalizer="${SCRIPT_DIR}/../utils/setup/normalize_criu_checkpoint.py"
+  if [[ ! -f "$checkpoint_normalizer" ]]; then
+    handle_error "Checkpoint normalization utility not found: $checkpoint_normalizer"
+  fi
+
+  checkpoint_normalizer_args=(
+    python3 "$checkpoint_normalizer"
+    --checkpoint-tar "$checkpointfile"
+    --output "$normalized_checkpointfile"
+    --log-file "$checkpoint_normalization_log"
+    --strict true
+  )
+
+  if [[ -n "$checkpointNormalizeMounts" ]]; then
+    IFS=',' read -r -a checkpoint_normalization_mount_array <<< "$checkpointNormalizeMounts"
+    for bad_mount in "${checkpoint_normalization_mount_array[@]}"; do
+      bad_mount="${bad_mount#"${bad_mount%%[![:space:]]*}"}"
+      bad_mount="${bad_mount%"${bad_mount##*[![:space:]]}"}"
+      if [[ -n "$bad_mount" ]]; then
+        checkpoint_normalizer_args+=(--bad-mount "$bad_mount")
+      fi
+    done
+  fi
+
+  startTime=$(date +%s%3N)
+  : > "$checkpoint_normalization_log" || handle_error "Failed to create checkpoint normalization log"
+  if ! "${checkpoint_normalizer_args[@]}" >>"$log_file" 2>&1; then
+    checkpointNormalizationTime=$(($(date +%s%3N) - startTime))
+    handle_error "Checkpoint normalization failed; refusing to build checkpoint image from unnormalized tar"
+  fi
+  checkpointNormalizationTime=$(($(date +%s%3N) - startTime))
+  sudo chmod a+r "$normalized_checkpointfile" || handle_error "Failed to make normalized checkpoint file readable"
+  checkpointfile_for_image="$normalized_checkpointfile"
+  log "-- Checkpoint normalization completed in ${checkpointNormalizationTime} ms --"
+else
+  checkpointNormalizationTime=0
+  log "-- Checkpoint mount normalization disabled; building checkpoint image from original tar --"
+fi
+
+log "------------------------------------------------------------------"
+
 log "-- Convert checkpoint into image --"
 
 startTime=$(date +%s%3N)
 log "Checkpoint image name: $source_image_ref"
 log "Checkpoint file: $checkpointfile"
+log "Checkpoint file used for image: $checkpointfile_for_image"
 newcontainer=$(buildah from --tls-verify=false "$source_image_ref") || handle_error "Failed to create new container"
-buildah add $newcontainer $checkpointfile / || handle_error "Failed to add checkpoint file to container"
-buildah config --annotation=io.kubernetes.cri-o.annotations.checkpoint.name=${containerName} $newcontainer || handle_error "Failed to add checkpoint annotation to container"
+buildah add "$newcontainer" "$checkpointfile_for_image" / || handle_error "Failed to add checkpoint file to container"
+buildah config --annotation="io.kubernetes.cri-o.annotations.checkpoint.name=${containerName}" "$newcontainer" || handle_error "Failed to add checkpoint annotation to container"
 if [[ "$skipCpuCompatCheck" == true ]]; then
   log "-- Skipping CRIU checkpoint.options cpu-cap annotation because --skip-cpu-compat-check is enabled --"
 else
-  buildah config --annotation=io.kubernetes.cri-o.annotations.checkpoint.options=--cpu-cap=${criuCpuCapMode} $newcontainer || handle_error "Failed to add CRIU cpu-cap restore annotation to container"
+  buildah config --annotation="io.kubernetes.cri-o.annotations.checkpoint.options=--cpu-cap=${criuCpuCapMode}" "$newcontainer" || handle_error "Failed to add CRIU cpu-cap restore annotation to container"
 fi
-buildah config --annotation=io.container.manager=crio $newcontainer || handle_error "Failed to add crio annotation to container"
+buildah config --annotation=io.container.manager=crio "$newcontainer" || handle_error "Failed to add crio annotation to container"
 newImageTime=$(($(date +%s%3N) - $startTime))
 
 checkpoint_image_name=$(image="$source_image_ref" && image=${image##*/} && image=${image%%:*} && echo "$image") || handle_error "Failed to get image name"
@@ -1241,8 +1384,8 @@ log "Checkpoint image tag: $checkpoint_image_tag"
 log "-- Commiting new image --"
 
 startTime=$(date +%s%3N)
-buildah commit $newcontainer "$local_checkpoint_image_ref" || handle_error "Failed to commit new image"
-buildah rm $newcontainer || handle_error "Failed to remove new container"
+buildah commit "$newcontainer" "$local_checkpoint_image_ref" || handle_error "Failed to commit new image"
+buildah rm "$newcontainer" || handle_error "Failed to remove new container"
 
 log "-- Pushing image \"$registry_checkpoint_image_ref\" to local registry --"
 buildah push --tls-verify=false "localhost/$local_checkpoint_image_ref" "$registry_checkpoint_image_ref" || handle_error "Failed to push image to local registry"

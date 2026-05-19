@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app_routes import logs, k8s, migration, config, simulation, tee_encapsulation
+from app_routes import logs, k8s, migration, config, simulation, tee_encapsulation, evaluation
 import logging
 import urllib3
 
@@ -29,6 +29,7 @@ app.include_router(k8s.router, prefix="/k8s", tags=["Kubernetes"])
 app.include_router(config.router, prefix="/config", tags=["Configuration"])
 app.include_router(simulation.router, prefix="/simulate", tags=["Attack Simulation"])
 app.include_router(tee_encapsulation.router, prefix="/tee-operation", tags=["TEE Encapsulation"])
+app.include_router(evaluation.router, prefix="/evaluation", tags=["Evaluation"])
 
 class IgnoreAlertEndpoint(logging.Filter):
     def filter(self, record):
