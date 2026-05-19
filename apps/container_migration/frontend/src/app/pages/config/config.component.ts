@@ -22,6 +22,7 @@ export class ConfigComponent implements OnInit {
   public selectedCluster: string = '';
   public selectedAction: string = '';
   public selectedTargetCluster: string = '';
+  public selectedIstioRoutingContext: string = 'cluster1';
   public isGeneratingFA: boolean = false;
   public isGeneratingAISuggestion: boolean = false;
 
@@ -47,6 +48,7 @@ export class ConfigComponent implements OnInit {
         label: cluster,
         value: cluster
       } as SelectItem));
+      this.selectedIstioRoutingContext = this.getDefaultIstioRoutingContext();
       this.updateTargetClusterSelection();
     });
   }
@@ -60,6 +62,14 @@ export class ConfigComponent implements OnInit {
 
   private updateTargetClusterSelection(): void {
     this.targetClusterSelection = this.clusterSelection.filter(cluster => cluster.value !== this.selectedCluster);
+  }
+
+  private getDefaultIstioRoutingContext(): string {
+    const cluster1 = this.clusterSelection.find((cluster) => String(cluster.value) === 'cluster1');
+    if (cluster1) {
+      return String(cluster1.value);
+    }
+    return this.clusterSelection.length > 0 ? String(this.clusterSelection[0].value) : 'cluster1';
   }
 
   private getConfig() {
@@ -112,6 +122,9 @@ export class ConfigComponent implements OnInit {
       cluster: this.selectedCluster,
       action: this.selectedAction,
       targetCluster: this.selectedTargetCluster,
+      istio_routing_context: this.selectedAction === 'migrate'
+        ? (this.selectedIstioRoutingContext || this.getDefaultIstioRoutingContext())
+        : 'cluster1',
       forensic_analysis: this.isGeneratingFA,
       AI_suggestion: this.isGeneratingAISuggestion
     };
@@ -133,6 +146,7 @@ export class ConfigComponent implements OnInit {
     this.selectedCluster = '';
     this.selectedAction = '';
     this.selectedTargetCluster = '';
+    this.selectedIstioRoutingContext = this.getDefaultIstioRoutingContext();
     this.isGeneratingFA = false;
     this.isGeneratingAISuggestion = false;
   }

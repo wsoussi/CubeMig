@@ -46,6 +46,7 @@ class EvaluationStartRequest(BaseModel):
     out_root: str | None = None
     checkpoint_root: str | None = None
     registry_address: str | None = None
+    istio_routing_context: str = "cluster1"
     skip_cpu_compat_check: bool = True
     cleanup_incompatible_mounts: bool | None = None
     disable_istio_sidecar: bool = False
@@ -142,6 +143,8 @@ def _validate_start_request(body: EvaluationStartRequest) -> None:
         raise HTTPException(status_code=400, detail=f"Unknown source cluster: {body.source}")
     if not k8s_client.has_cluster(body.dest):
         raise HTTPException(status_code=400, detail=f"Unknown dest cluster: {body.dest}")
+    if not k8s_client.has_cluster((body.istio_routing_context or "cluster1").strip() or "cluster1"):
+        raise HTTPException(status_code=400, detail=f"Unknown Istio routing context: {body.istio_routing_context}")
     if not EVAL_WRAPPER.is_file():
         raise HTTPException(status_code=500, detail=f"Evaluation wrapper not found: {EVAL_WRAPPER}")
     if not MIGRATION_SCRIPT.is_file():
@@ -162,6 +165,8 @@ def _build_migration_argv(body: EvaluationStartRequest, registry: str, run_dir: 
         body.namespace,
         "--registry",
         registry,
+        "--istio-routing-context",
+        (body.istio_routing_context or "cluster1").strip() or "cluster1",
     ]
     if body.forensic_analysis:
         cmd.append("--forensic-analysis")
@@ -206,6 +211,8 @@ def _build_wrapper_argv(body: EvaluationStartRequest, run_id: str, out_root: Pat
         str(out_root),
         "--checkpoint-root",
         str(ckpt_root),
+        "--istio-routing-context",
+        (body.istio_routing_context or "cluster1").strip() or "cluster1",
         "--",
     ]
     registry = (body.registry_address or "").strip() or _default_registry(body.dest)

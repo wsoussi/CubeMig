@@ -27,6 +27,10 @@
                     <label class="block mb-2">Pod</label>
                     <p-dropdown [options]="podOptions" [(ngModel)]="formPod" placeholder="Running pod on source" [style]="{'width':'100%'}"></p-dropdown>
                 </div>
+                <div class="field col-12 md:col-4">
+                    <label class="block mb-2">Istio routing context</label>
+                    <p-dropdown [options]="clusterOptions" [(ngModel)]="formIstioRoutingContext" placeholder="cluster1" [style]="{'width':'100%'}"></p-dropdown>
+                </div>
                 <div class="field col-12 md:col-3">
                     <label class="block mb-2">Load (RPS)</label>
                     <input pInputText type="number" min="0" [(ngModel)]="formLoadRps" class="w-full" />

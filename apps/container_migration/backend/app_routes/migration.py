@@ -28,6 +28,7 @@ class ManualMigrationRequest(BaseModel):
     podName: str
     appName: str
     registryAddress: str | None = None
+    istioRoutingContext: str = "cluster1"
     forensicAnalysis: bool = False
     AISuggestion: bool = False
     disableIstioSidecar: bool = False
@@ -43,6 +44,12 @@ def _validate_cluster_pair(source_cluster: str, target_cluster: str):
         raise HTTPException(status_code=400, detail=f"Unknown source cluster: {source_cluster}")
     if not k8s_client.has_cluster(target_cluster):
         raise HTTPException(status_code=400, detail=f"Unknown target cluster: {target_cluster}")
+
+def _validate_istio_routing_context(istio_routing_context: str):
+    if not istio_routing_context:
+        raise HTTPException(status_code=400, detail="istioRoutingContext is required")
+    if not k8s_client.has_cluster(istio_routing_context):
+        raise HTTPException(status_code=400, detail=f"Unknown Istio routing context: {istio_routing_context}")
 
 def _clusters_with_pod(pod_name: str, namespace: str) -> list[str]:
     """Return kube contexts where the pod exists in the given namespace."""
@@ -69,6 +76,7 @@ def _apply_rule_config_to_info(info: MigrationInfo, rule_config, namespace: str)
     info.namespace = namespace
     info.forensic_analysis = rule_config.forensic_analysis
     info.AI_suggestion = rule_config.AI_suggestion
+    info.istio_routing_context = (rule_config.istio_routing_context or "cluster1").strip() or "cluster1"
     if rule_config.registry_address:
         info.registry_address = rule_config.registry_address.strip() or None
     if rule_config.disable_istio_sidecar:
@@ -653,6 +661,7 @@ async def handle_alerts(alert: Alert):
         if rule_config.action == "migrate":
             _apply_rule_config_to_info(info, rule_config, namespace)
             _validate_cluster_pair(info.source_cluster, info.target_cluster)
+            _validate_istio_routing_context(info.istio_routing_context or "cluster1")
             triggeredMigrations.append(pod_name)
             print(
                 f"Triggering migration for pod {pod_name}: "
@@ -724,6 +733,8 @@ async def run_migration_script(info: MigrationInfo, log_path: str):
             cmd.extend(["--namespace", info.namespace])
         if info.registry_address:
             cmd.extend(["--registry", info.registry_address])
+        if info.istio_routing_context:
+            cmd.extend(["--istio-routing-context", info.istio_routing_context])
         if info.forensic_analysis:
             cmd.append("--forensic-analysis")
         if info.AI_suggestion:
@@ -923,6 +934,8 @@ def _status_from_eval_run_dir(log_path: str):
 @router.post("/migrate")
 async def migrate_pod(body: ManualMigrationRequest):
     _validate_cluster_pair(body.sourceCluster, body.targetCluster)
+    istio_routing_context = (body.istioRoutingContext or "cluster1").strip() or "cluster1"
+    _validate_istio_routing_context(istio_routing_context)
     
     info = MigrationInfo(
         k8s_pod_name=body.podName,
@@ -932,6 +945,7 @@ async def migrate_pod(body: ManualMigrationRequest):
         target_cluster=body.targetCluster,
         namespace=body.namespace,
         registry_address=(body.registryAddress or "").strip() or None,
+        istio_routing_context=istio_routing_context,
         forensic_analysis=body.forensicAnalysis,
         AI_suggestion=body.AISuggestion,
         disable_istio_sidecar=body.disableIstioSidecar,

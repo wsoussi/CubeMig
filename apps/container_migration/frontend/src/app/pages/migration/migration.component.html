@@ -18,6 +18,10 @@
             <div class="mb-3">
                 <p-dropdown [options]="namespaceList" [(ngModel)]="selectedNamespace" placeholder="Select the namespace" [style]="{'width': '100%'}"></p-dropdown>
             </div>
+            <div class="mb-3">
+                <label for="istioRoutingContext" class="block mb-2">Istio routing context</label>
+                <p-dropdown inputId="istioRoutingContext" [options]="sourceCluster" [(ngModel)]="istioRoutingContext" placeholder="cluster1" [style]="{'width': '100%'}"></p-dropdown>
+            </div>
             
             @if(areDropdownsFilled()) {
                 <p-dropdown [options]="podsCluster1" [(ngModel)]="selectedPod" placeholder="Select the pod to migrate" [showClear]="true" [style]="{'width': '100%'}"></p-dropdown>

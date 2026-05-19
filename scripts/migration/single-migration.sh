@@ -16,6 +16,7 @@ normalizeCheckpointMounts_cli_specified=false
 skipCheckpointNormalization_explicit=false
 checkpointNormalizeMounts="${CHECKPOINT_NORMALIZE_MOUNTS:-}"
 criuCpuCapMode="${CRIU_CPU_CAP:-cpu}"
+ISTIO_ROUTING_CONTEXT="${ISTIO_ROUTING_CONTEXT:-cluster1}"
 
 # Cluster parameters must be provided explicitly
 sourceCluster=""
@@ -28,11 +29,12 @@ PNET_WIREGUARD_MIGRATION_REGISTRY="${PNET_WIREGUARD_MIGRATION_REGISTRY:-10.10.10
 
 # Parse command-line options
 log_dir_specified=false
+istioRoutingContext_cli_specified=false
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         -fa|--forensic-analysis) forensicAnalysis=true ;;
         -ai|--ai-suggestion) AISuggestion=true ;;
-        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] [--skip-cpu-compat-check] [--cleanup-incompatible-mounts] [--skip-checkpoint-normalization] [--normalize-checkpoint-mounts] [--cpu-cap <cpu|fpu|ins|cpu,ins|all>] --"; echo "-- Env: MIGRATION_REGISTRY=<host:port> (default 160.85.255.146:5000; CLUSTER1_REGISTRY still accepted). PRE_CHECKPOINT_ISTIO_503=true|false (default true): inject HTTP 503 on routing-demo VS before checkpoint; cleared when switching to v2. CRIU_CPU_CAP=<mode> defaults to cpu. SKIP_CPU_COMPAT_CHECK=true|false skips the CRIU CPU compatibility validator pod. CLEANUP_INCOMPATIBLE_MOUNTS=true|false runs the source pre-checkpoint powercap cleanup and also enables checkpoint mount normalization unless --skip-checkpoint-normalization is passed. NORMALIZE_CHECKPOINT_MOUNTS=true|false (default false) can enable checkpoint normalization for direct CLI runs without cleanup. CHECKPOINT_NORMALIZE_MOUNTS=/path/a,/path/b overrides the Python normalizer's conservative bad-mount list. --"; exit 0 ;;
+        -h|--help) echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--istio-routing-context <context>] [--disable-istio-sidecar] [--skip-cpu-compat-check] [--cleanup-incompatible-mounts] [--skip-checkpoint-normalization] [--normalize-checkpoint-mounts] [--cpu-cap <cpu|fpu|ins|cpu,ins|all>] --"; echo "-- Env: MIGRATION_REGISTRY=<host:port> (default 160.85.255.146:5000; CLUSTER1_REGISTRY still accepted). ISTIO_ROUTING_CONTEXT=<context> defaults to cluster1 and controls central routing-demo VirtualService reads/patches. PRE_CHECKPOINT_ISTIO_503=true|false (default true): inject HTTP 503 on routing-demo VS before checkpoint; cleared when switching to v2. CRIU_CPU_CAP=<mode> defaults to cpu. SKIP_CPU_COMPAT_CHECK=true|false skips the CRIU CPU compatibility validator pod. CLEANUP_INCOMPATIBLE_MOUNTS=true|false runs the source pre-checkpoint powercap cleanup and also enables checkpoint mount normalization unless --skip-checkpoint-normalization is passed. NORMALIZE_CHECKPOINT_MOUNTS=true|false (default false) can enable checkpoint normalization for direct CLI runs without cleanup. CHECKPOINT_NORMALIZE_MOUNTS=/path/a,/path/b overrides the Python normalizer's conservative bad-mount list. --"; exit 0 ;;
         --log-dir) 
             shift
             custom_log_dir=$1
@@ -53,6 +55,11 @@ while [[ "$#" -gt 0 ]]; do
         --registry)
             shift
             migrationRegistry=$1
+            ;;
+        --istio-routing-context)
+            shift
+            ISTIO_ROUTING_CONTEXT=$1
+            istioRoutingContext_cli_specified=true
             ;;
         --disable-istio-sidecar)
             disableIstioSidecar=true
@@ -91,7 +98,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 if [ -z "$podName" ]; then
-    echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--disable-istio-sidecar] [--skip-cpu-compat-check] [--cleanup-incompatible-mounts] [--skip-checkpoint-normalization] [--normalize-checkpoint-mounts] [--cpu-cap <cpu|fpu|ins|cpu,ins|all>] --"
+    echo "-- Usage: $0 <podName> [--forensic-analysis|-fa] [--log-dir <path>] [--source-cluster <name>] [--dest-cluster <name>] [--namespace <ns>] [--registry <host:port>] [--istio-routing-context <context>] [--disable-istio-sidecar] [--skip-cpu-compat-check] [--cleanup-incompatible-mounts] [--skip-checkpoint-normalization] [--normalize-checkpoint-mounts] [--cpu-cap <cpu|fpu|ins|cpu,ins|all>] --"
     exit 1
 fi
 
@@ -109,9 +116,15 @@ fi
 # namespace already set to "default" unless overridden by --namespace
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+istioRoutingContext_cli_value="$ISTIO_ROUTING_CONTEXT"
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
   # shellcheck source=/dev/null
   source "$SCRIPT_DIR/.env"
+fi
+if [[ "$istioRoutingContext_cli_specified" == true ]]; then
+  ISTIO_ROUTING_CONTEXT="$istioRoutingContext_cli_value"
+else
+  ISTIO_ROUTING_CONTEXT="${ISTIO_ROUTING_CONTEXT:-cluster1}"
 fi
 if [[ "$normalizeCheckpointMounts_cli_specified" != true ]]; then
   normalizeCheckpointMounts="${NORMALIZE_CHECKPOINT_MOUNTS:-$normalizeCheckpointMounts}"
@@ -180,6 +193,7 @@ context_exists() {
 
 context_exists "$sourceCluster" || handle_error "Unknown source cluster context: $sourceCluster"
 context_exists "$destCluster" || handle_error "Unknown destination cluster context: $destCluster"
+context_exists "$ISTIO_ROUTING_CONTEXT" || handle_error "Unknown Istio routing context: $ISTIO_ROUTING_CONTEXT"
 
 if [[ "$enableCheckpointPrepull" =~ ^([Tt][Rr][Uu][Ee]|1|[Yy][Ee]?[Ss])$ ]]; then
   enableCheckpointPrepull=true
@@ -980,6 +994,7 @@ if [[ "$destClusterNormalized" == "cluster-pnet" || "$destClusterNormalized" == 
   log "-- PNET destination detected: forcing checkpoint image pre-pull --"
 fi
 log "Namespace: $namespace"
+log "Using Istio routing context: $ISTIO_ROUTING_CONTEXT"
 log "Destination registry: $migrationRegistry"
 log "Disable Istio sidecar: $disableIstioSidecar"
 log "Enable checkpoint pre-pull: $enableCheckpointPrepull"
@@ -1096,13 +1111,13 @@ log "-- Checkpoint (source cluster only): NFS mirror $checkpoint_nfs_root/<sourc
 
 # Variant A: explicit 503 before checkpoint so v1 does not serve new requests while dumping / waiting on NFS.
 if [[ "$preCheckpointIstio503" == true && "$namespace" == "istio-enabled" && "$templateContainerName" == "routing-demo" ]]; then
-  if kubectl get virtualservice routing-demo >/dev/null 2>&1; then
+  if kubectl --context "$ISTIO_ROUTING_CONTEXT" -n "$namespace" get virtualservice routing-demo >/dev/null 2>&1; then
     log "-- Pre-checkpoint: Istio fault.abort HTTP 503 on VirtualService routing-demo (stops v1 state advancing until restore) --"
-    if kubectl patch virtualservice routing-demo --type=json -p='[
+    if kubectl --context "$ISTIO_ROUTING_CONTEXT" -n "$namespace" patch virtualservice routing-demo --type=json -p='[
       {"op":"add","path":"/spec/http/0/fault","value":{"abort":{"httpStatus":503,"percentage":{"value":100}}}}
     ]' >>"$log_file" 2>&1; then
       istio_pre_checkpoint_503_applied=true
-    elif kubectl patch virtualservice routing-demo --type=json -p='[
+    elif kubectl --context "$ISTIO_ROUTING_CONTEXT" -n "$namespace" patch virtualservice routing-demo --type=json -p='[
       {"op":"replace","path":"/spec/http/0/fault","value":{"abort":{"httpStatus":503,"percentage":{"value":100}}}}
     ]' >>"$log_file" 2>&1; then
       istio_pre_checkpoint_503_applied=true
@@ -1110,7 +1125,7 @@ if [[ "$preCheckpointIstio503" == true && "$namespace" == "istio-enabled" && "$t
       log "-- Warning: Could not inject pre-checkpoint 503 on VirtualService routing-demo --"
     fi
   else
-    log "-- Pre-checkpoint 503 skipped: VirtualService routing-demo not found --"
+    handle_error "routing-demo VirtualService not found in Istio routing context $ISTIO_ROUTING_CONTEXT"
   fi
 fi
 
@@ -1488,18 +1503,19 @@ if [[ "$pod_running" == true ]]; then
   podReadyTime=$(($(date +%s%3N) - $startTime))
 
   selected_virtualservice=""
-  kubectl config use-context "$sourceCluster" || handle_error "Failed to switch context to $sourceCluster for traffic switch"
-  kubectl config set-context --current --namespace="$namespace"
-  if kubectl get virtualservice "$appName" >/dev/null 2>&1; then
+  if kubectl --context "$ISTIO_ROUTING_CONTEXT" -n "$namespace" get virtualservice "$appName" >/dev/null 2>&1; then
     selected_virtualservice="$appName"
-  elif kubectl get virtualservice routing-demo >/dev/null 2>&1; then
+  elif kubectl --context "$ISTIO_ROUTING_CONTEXT" -n "$namespace" get virtualservice routing-demo >/dev/null 2>&1; then
     selected_virtualservice="routing-demo"
+  fi
+  if [[ "$namespace" == "istio-enabled" && "$templateContainerName" == "routing-demo" && "$selected_virtualservice" != "routing-demo" ]]; then
+    handle_error "routing-demo VirtualService not found in Istio routing context $ISTIO_ROUTING_CONTEXT"
   fi
 
   if [[ "$containerName" == "mmt-probe" ]]; then
     log "-- Detected mmt-probe container, switching mirroring rule --"
     if [[ -n "$selected_virtualservice" ]]; then
-      kubectl patch virtualservice "$selected_virtualservice" --type='json' -p='[
+      kubectl --context "$ISTIO_ROUTING_CONTEXT" -n "$namespace" patch virtualservice "$selected_virtualservice" --type='json' -p='[
         {
           "op": "replace",
           "path": "/spec/http/0/mirrors/0/destination/subset",
@@ -1514,22 +1530,22 @@ if [[ "$pod_running" == true ]]; then
     log "-- Switching traffic to the new pod --"
     if [[ -n "$selected_virtualservice" ]]; then
       if [[ "$istio_pre_checkpoint_503_applied" == true && "$selected_virtualservice" == "routing-demo" ]]; then
-        kubectl patch virtualservice "$selected_virtualservice" --type=json -p='[
+        kubectl --context "$ISTIO_ROUTING_CONTEXT" -n "$namespace" patch virtualservice "$selected_virtualservice" --type=json -p='[
           {"op":"remove","path":"/spec/http/0/fault"},
           {"op":"replace","path":"/spec/http/0/route/0/destination/subset","value":"v2"}
         ]' >>"$log_file" 2>&1 || {
           log "-- Warning: combined remove fault + route v2 failed; removing fault then patching subset --"
-          kubectl patch virtualservice "$selected_virtualservice" --type=json -p='[{"op":"remove","path":"/spec/http/0/fault"}]' >>"$log_file" 2>&1 || true
-          kubectl patch virtualservice "$selected_virtualservice" --type=json -p='[{"op":"replace","path":"/spec/http/0/route/0/destination/subset","value":"v2"}]' || handle_error "Failed to redirect traffic to new app"
+          kubectl --context "$ISTIO_ROUTING_CONTEXT" -n "$namespace" patch virtualservice "$selected_virtualservice" --type=json -p='[{"op":"remove","path":"/spec/http/0/fault"}]' >>"$log_file" 2>&1 || true
+          kubectl --context "$ISTIO_ROUTING_CONTEXT" -n "$namespace" patch virtualservice "$selected_virtualservice" --type=json -p='[{"op":"replace","path":"/spec/http/0/route/0/destination/subset","value":"v2"}]' >>"$log_file" 2>&1 || handle_error "Failed to redirect traffic to new app"
         }
       else
-        kubectl patch virtualservice "$selected_virtualservice" --type='json' -p='[
+        kubectl --context "$ISTIO_ROUTING_CONTEXT" -n "$namespace" patch virtualservice "$selected_virtualservice" --type='json' -p='[
           {
             "op": "replace",
             "path": "/spec/http/0/route/0/destination/subset",
             "value": "v2"
           }
-        ]' || handle_error "Failed to redirect traffic to new app"
+        ]' >>"$log_file" 2>&1 || handle_error "Failed to redirect traffic to new app"
       fi
     else
       log "-- Warning: No VirtualService found (expected \"$appName\" or \"routing-demo\"); skipping traffic switch --"

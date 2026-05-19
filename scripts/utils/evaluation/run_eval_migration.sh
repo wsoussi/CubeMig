@@ -36,6 +36,7 @@ Usage:
     [--probe-interval-ms <ms>]   (default: 500) \
     [--probe-pre-seconds <s>]    (default: 30) \
     [--probe-post-seconds <s>]   (default: 60) \
+    [--istio-routing-context <kubectl-context>] (default: cluster1) \
     [--expected-initial-subset <subset>]  (default: v1) \
     [--allow-existing-fault]     (default: abort if Istio fault present) \
     -- <migration command and its arguments>
@@ -65,6 +66,7 @@ PROBE_INTERVAL_MS=500
 PROBE_PRE_SECONDS=30
 PROBE_POST_SECONDS=60
 EXPECTED_INITIAL_SUBSET="v1"
+ISTIO_ROUTING_CONTEXT="${ISTIO_ROUTING_CONTEXT:-cluster1}"
 ALLOW_EXISTING_FAULT=false
 MIGRATION_CMD=()
 
@@ -85,6 +87,7 @@ while [[ $# -gt 0 ]]; do
         --probe-interval-ms)      PROBE_INTERVAL_MS="${2:-}";      shift 2 ;;
         --probe-pre-seconds)      PROBE_PRE_SECONDS="${2:-}";      shift 2 ;;
         --probe-post-seconds)     PROBE_POST_SECONDS="${2:-}";     shift 2 ;;
+        --istio-routing-context)  ISTIO_ROUTING_CONTEXT="${2:-}";  shift 2 ;;
         --expected-initial-subset) EXPECTED_INITIAL_SUBSET="${2:-}"; shift 2 ;;
         --allow-existing-fault)   ALLOW_EXISTING_FAULT=true;       shift ;;
         --allow-existing-fault=*) ALLOW_EXISTING_FAULT="${1#*=}"; shift ;;
@@ -97,6 +100,7 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+ISTIO_ROUTING_CONTEXT="${ISTIO_ROUTING_CONTEXT:-cluster1}"
 
 missing=()
 for var in RUN_ID SOURCE_CTX DEST_CTX NAMESPACE WORKLOAD POD LOAD_RPS CONCURRENCY TRIGGER; do
@@ -191,6 +195,7 @@ write_metadata() {
         printf '  "load_rps": %s,\n'       "$(json_num "$LOAD_RPS")"
         printf '  "concurrency": %s,\n'    "$(json_num "$CONCURRENCY")"
         printf '  "trigger": %s,\n'        "$(json_str "$TRIGGER")"
+        printf '  "istio_routing_context": %s,\n' "$(json_str "$ISTIO_ROUTING_CONTEXT")"
         printf '  "start_time_utc": %s,\n' "$(json_str "$START_TIME_UTC")"
         printf '  "end_time_utc": %s,\n'   "$(json_str "$END_TIME_UTC")"
         printf '  "exit_code": %s,\n'      "$(json_num "$MIGRATION_EXIT")"
@@ -304,8 +309,8 @@ run_pre_migration_sanity() {
     {
         echo "# pre-run sanity ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
         echo
-        echo "## kubectl --context cluster1 -n istio-enabled get virtualservice routing-demo -o yaml"
-        vs_yaml=$(kubectl --context cluster1 -n istio-enabled get virtualservice routing-demo -o yaml 2>&1) || vs_yaml="(failed)"
+        echo "## kubectl --context $ISTIO_ROUTING_CONTEXT -n istio-enabled get virtualservice routing-demo -o yaml"
+        vs_yaml=$(kubectl --context "$ISTIO_ROUTING_CONTEXT" -n istio-enabled get virtualservice routing-demo -o yaml 2>&1) || vs_yaml="(failed)"
         printf '%s\n' "$vs_yaml"
         echo
         echo "## kubectl --context $SOURCE_CTX -n $NAMESPACE get pod $POD -o wide"
@@ -318,14 +323,14 @@ run_pre_migration_sanity() {
         fi
     } >> "$out" 2>/dev/null || true
 
-    if kubectl --context cluster1 -n istio-enabled get virtualservice routing-demo \
+    if kubectl --context "$ISTIO_ROUTING_CONTEXT" -n istio-enabled get virtualservice routing-demo \
         -o jsonpath='{.spec.http[0].fault}' 2>/dev/null | grep -q .; then
         fault_present=true
     fi
 
     if [[ "$fault_present" == true ]]; then
         PRE_EXISTING_FAULT_DETECTED=true
-        echo "pre-existing Istio fault detected on routing-demo VirtualService (cluster1)" >> "$out"
+        echo "pre-existing Istio fault detected on routing-demo VirtualService ($ISTIO_ROUTING_CONTEXT)" >> "$out"
         if [[ "$ALLOW_EXISTING_FAULT" != true && "$ALLOW_EXISTING_FAULT" != "true" && "$ALLOW_EXISTING_FAULT" != "1" ]]; then
             echo "pre-existing Istio fault detected; clear fault before evaluation run" >> "$out"
             log "ABORT: pre-existing Istio fault detected; clear fault before evaluation run"
@@ -334,7 +339,7 @@ run_pre_migration_sanity() {
         log "Warning: pre-existing Istio fault present (--allow-existing-fault enabled)"
     fi
 
-    current_subset=$(kubectl --context cluster1 -n istio-enabled get virtualservice routing-demo \
+    current_subset=$(kubectl --context "$ISTIO_ROUTING_CONTEXT" -n istio-enabled get virtualservice routing-demo \
         -o jsonpath='{.spec.http[0].route[0].destination.subset}' 2>/dev/null || true)
     if [[ -n "$current_subset" && "$current_subset" != "$EXPECTED_INITIAL_SUBSET" ]]; then
         log "Warning: routing-demo subset is '$current_subset', expected '$EXPECTED_INITIAL_SUBSET'"
@@ -417,14 +422,13 @@ collect_k8s_snapshot() {
     done
 }
 
-# Istio control plane snapshot. cluster1 hosts the central Istio control plane / ingress
-# in this thesis setup, so we always query cluster1 here (best-effort: it may be unreachable).
+# Istio control plane snapshot from the selected central routing context.
 collect_istio_snapshot() {
     local out="$1"
     {
-        echo "# best-effort istio snapshot from cluster1 (central Istio control plane in this thesis setup)"
-        echo "## kubectl --context cluster1 -n istio-enabled get virtualservice,destinationrule,gateway -o yaml"
-        kubectl --context cluster1 -n istio-enabled get virtualservice,destinationrule,gateway -o yaml 2>&1 \
+        echo "# best-effort istio snapshot from $ISTIO_ROUTING_CONTEXT"
+        echo "## kubectl --context $ISTIO_ROUTING_CONTEXT -n istio-enabled get virtualservice,destinationrule,gateway -o yaml"
+        kubectl --context "$ISTIO_ROUTING_CONTEXT" -n istio-enabled get virtualservice,destinationrule,gateway -o yaml 2>&1 \
             || echo "(failed)"
     } > "$out" 2>/dev/null || true
 }
@@ -644,12 +648,13 @@ write_metadata
 
 log "Run $RUN_ID starting (source=$SOURCE_CTX, dest=$DEST_CTX, workload=$WORKLOAD, trigger=$TRIGGER)"
 log "Run directory: $RUN_DIR"
+log "Using Istio routing context: $ISTIO_ROUTING_CONTEXT"
 
 # Pre-migration snapshots.
 log "Collecting k8s_before.txt"
 collect_k8s_snapshot "$RUN_DIR/k8s_before.txt" || true
 
-log "Collecting istio_before.yaml (best-effort against cluster1)"
+log "Collecting istio_before.yaml (best-effort against $ISTIO_ROUTING_CONTEXT)"
 collect_istio_snapshot "$RUN_DIR/istio_before.yaml" || true
 
 log "Collecting wg_before.txt (if wg0 exists)"

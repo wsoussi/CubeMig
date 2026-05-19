@@ -32,6 +32,7 @@ export class MigrationComponent implements OnInit, OnDestroy{
   cleanupIncompatibleMountsTouched = false;
   loading = false;
   registryAddress = this.defaultPublicRegistry;
+  istioRoutingContext = 'cluster1';
   routingDemoTrafficSubset = '';
   routingDemoTrafficSubsetAvailable = true;
   trafficToggleLoading = false;
@@ -148,7 +149,11 @@ export class MigrationComponent implements OnInit, OnDestroy{
       }
       this.registryAddress = this.getRegistryForTarget(this.selectedTarget);
       this.applyTargetClusterDefaults();
-      this.trafficSwitchCluster = this.selectedSource || (options[0] ? String(options[0].value) : '');
+      const defaultRoutingContext = this.getDefaultIstioRoutingContext(options);
+      if (!this.istioRoutingContext || !options.some((opt) => opt.value === this.istioRoutingContext)) {
+        this.istioRoutingContext = defaultRoutingContext;
+      }
+      this.trafficSwitchCluster = defaultRoutingContext;
       this.getPodsForSource();
       this.loadRoutingDemoTrafficSubset();
     });
@@ -160,7 +165,6 @@ export class MigrationComponent implements OnInit, OnDestroy{
       this.selectedTarget = '';
       this.registryAddress = this.getRegistryForTarget(this.selectedTarget);
     }
-    this.trafficSwitchCluster = this.selectedSource;
     this.getPodsForSource();
     this.loadRoutingDemoTrafficSubset();
   }
@@ -176,6 +180,14 @@ export class MigrationComponent implements OnInit, OnDestroy{
       return this.pnetWireguardRegistry;
     }
     return this.defaultPublicRegistry;
+  }
+
+  private getDefaultIstioRoutingContext(options: SelectItem[] = this.sourceCluster): string {
+    const cluster1 = options.find((opt) => String(opt.value) === 'cluster1');
+    if (cluster1) {
+      return String(cluster1.value);
+    }
+    return options.length > 0 ? String(options[0].value) : 'cluster1';
   }
 
   /** PNET / SEV-SNP destinations lack the powercap mount paths CRIU restores need; default cleanup ON for them. */
@@ -554,7 +566,8 @@ export class MigrationComponent implements OnInit, OnDestroy{
     this.skipCpuCompatCheck = true;
     this.cleanupIncompatibleMountsTouched = false;
     this.cleanupIncompatibleMounts = this.isHeterogeneousTarget(this.selectedTarget);
-    this.trafficSwitchCluster = this.sourceCluster.length ? String(this.sourceCluster[0].value) : '';
+    this.istioRoutingContext = this.getDefaultIstioRoutingContext();
+    this.trafficSwitchCluster = this.getDefaultIstioRoutingContext();
     this.loadRoutingDemoTrafficSubset();
   }
 
@@ -580,6 +593,7 @@ export class MigrationComponent implements OnInit, OnDestroy{
       podName: this.selectedPod.podName!,
       appName: this.selectedPod.appName!,
       registryAddress: (this.registryAddress || '').trim() || this.defaultPublicRegistry,
+      istioRoutingContext: this.istioRoutingContext || this.getDefaultIstioRoutingContext(),
       forensicAnalysis: this.isGeneratingFA,
       AISuggestion: this.isGeneratingAISuggestion,
       disableIstioSidecar: this.disableIstioSidecar,

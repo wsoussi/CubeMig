@@ -66,6 +66,7 @@ export class EvaluationComponent implements OnInit, OnDestroy {
   formTrigger = 'manual';
   formRunId = '';
   formRegistry = this.defaultPublicRegistry;
+  formIstioRoutingContext = 'cluster1';
   formSkipCpuCompatCheck = true;
   formCleanupIncompatibleMounts: boolean | null = null;
   cleanupTouched = false;
@@ -158,6 +159,9 @@ export class EvaluationComponent implements OnInit, OnDestroy {
         const other = this.clusterOptions.find((o) => o.value !== this.formSource);
         this.formDest = other ? String(other.value) : '';
       }
+      if (!this.formIstioRoutingContext || !this.clusterOptions.some((o) => o.value === this.formIstioRoutingContext)) {
+        this.formIstioRoutingContext = this.getDefaultIstioRoutingContext();
+      }
       this.applyDestDefaults();
       this.loadPods();
     });
@@ -197,6 +201,14 @@ export class EvaluationComponent implements OnInit, OnDestroy {
       return this.pnetWireguardRegistry;
     }
     return this.defaultPublicRegistry;
+  }
+
+  private getDefaultIstioRoutingContext(): string {
+    const cluster1 = this.clusterOptions.find((opt) => String(opt.value) === 'cluster1');
+    if (cluster1) {
+      return String(cluster1.value);
+    }
+    return this.clusterOptions.length > 0 ? String(this.clusterOptions[0].value) : 'cluster1';
   }
 
   public isHeterogeneousTarget(target: string): boolean {
@@ -283,6 +295,7 @@ export class EvaluationComponent implements OnInit, OnDestroy {
       concurrency: this.formConcurrency,
       trigger: this.formTrigger,
       registry_address: (this.formRegistry || '').trim() || undefined,
+      istio_routing_context: this.formIstioRoutingContext || this.getDefaultIstioRoutingContext(),
       skip_cpu_compat_check: this.formSkipCpuCompatCheck,
       cleanup_incompatible_mounts: this.cleanupTouched ? this.formCleanupIncompatibleMounts : null,
       disable_istio_sidecar: this.formDisableIstioSidecar

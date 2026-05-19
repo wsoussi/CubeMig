@@ -56,6 +56,7 @@ export interface EvaluationStartRequest {
   concurrency: number;
   trigger: string;
   registry_address?: string;
+  istio_routing_context?: string;
   skip_cpu_compat_check?: boolean;
   cleanup_incompatible_mounts?: boolean | null;
   disable_istio_sidecar?: boolean;

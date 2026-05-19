@@ -5,6 +5,7 @@ export interface MigrationRequest {
     podName: string;
     appName: string;
     registryAddress: string;
+    istioRoutingContext: string;
     forensicAnalysis: boolean;
     AISuggestion: boolean;
     disableIstioSidecar: boolean;

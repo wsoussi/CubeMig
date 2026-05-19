@@ -11,6 +11,7 @@ class MigrationInfo(BaseModel):
      target_cluster: Optional[str] = None
      namespace: Optional[str] = None
      registry_address: Optional[str] = None
+     istio_routing_context: Optional[str] = "cluster1"
      forensic_analysis: Optional[bool] = None
      AI_suggestion: Optional[bool] = None
      disable_istio_sidecar: Optional[bool] = None
