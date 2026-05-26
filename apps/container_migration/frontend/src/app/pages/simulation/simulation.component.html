@@ -22,7 +22,7 @@
                     <p-dropdown
                         [options]="targetPod"
                         [(ngModel)]="selectedApp"
-                        [placeholder]="podsLoading ? 'Loading vuln-spring apps…' : (targetPod.length ? 'Select the target application' : 'No vuln-spring app found on cluster')"
+                        [placeholder]="podsLoading ? 'Loading vulnerable apps…' : (targetPod.length ? 'Select the target application' : 'No vuln-spring or vuln-redis app found on cluster')"
                         [disabled]="!selectedAttackCluster || podsLoading"
                         [style]="{'width': '100%'}">
                     </p-dropdown>

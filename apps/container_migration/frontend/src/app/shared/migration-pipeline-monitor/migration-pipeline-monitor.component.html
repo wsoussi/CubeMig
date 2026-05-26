@@ -27,7 +27,7 @@
     @if (downtimeMs != null) {
         <div class="downtime-summary">
             <span class="downtime-label">Downtime</span>
-            <span class="downtime-value" [pTooltip]="'From stopping the source workload after checkpoint until the restore pod reports Running.'" tooltipPosition="top">{{ formatDuration(downtimeMs) }}</span>
+            <span class="downtime-value" [pTooltip]="'From the source workload reporting scaled down after checkpoint until the restore pod reports Running. Client-observed HTTP downtime is measured separately by the evaluation probe.'" tooltipPosition="top">{{ formatDuration(downtimeMs) }}</span>
         </div>
     }
 

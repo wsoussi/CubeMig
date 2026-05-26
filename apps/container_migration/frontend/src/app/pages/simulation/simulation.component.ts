@@ -130,7 +130,7 @@ export class SimulationComponent implements OnInit, OnDestroy {
       for (const { namespace, pods } of perNamespace) {
         for (const pod of pods) {
           const appName = (pod.appName || '').trim();
-          if (!appName.startsWith('vuln-spring') || pod.status !== 'Running') {
+          if (!(appName.startsWith('vuln-spring') || appName.startsWith('vuln-redis')) || pod.status !== 'Running') {
             continue;
           }
           if (seen.has(appName)) {
@@ -159,12 +159,12 @@ export class SimulationComponent implements OnInit, OnDestroy {
   }
 
   public simulateAttack(): void {
-    if (!this.selectedApp.startsWith('vuln-spring')) {
+    if (!(this.selectedApp.startsWith('vuln-spring') || this.selectedApp.startsWith('vuln-redis'))) {
       this.messageService.add({
         key: 'tst',
         severity: 'warn',
         summary: 'Unsupported app',
-        detail: `Attack simulation currently supports only vuln-spring apps. Use Migration tab for ${this.selectedApp}.`
+        detail: `Attack simulation currently supports only vuln-spring and vuln-redis apps. Use Migration tab for ${this.selectedApp}.`
       });
       return;
     }

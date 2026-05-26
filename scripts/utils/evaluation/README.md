@@ -41,11 +41,20 @@ scripts/utils/evaluation/run_eval_migration.sh \
   --load-rps 1 \
   --concurrency 1 \
   --trigger manual \
+  --probe-url http://10.0.0.18:32366/whoami \
+  --probe-interval-ms 1000 \
+  --probe-pre-seconds 30 \
+  --probe-post-seconds 60 \
+  --reset-after-run \
+  --reset-routing-context cluster1 \
+  --reset-source-context cluster1 \
+  --reset-subset v1 \
   -- \
   ./scripts/migration/single-migration.sh routing-demo-7c8f6c5b6d-abcde \
     --source-cluster cluster1 \
     --dest-cluster cluster-sev-snp \
-    --namespace istio-enabled
+    --namespace istio-enabled \
+    --istio-routing-context cluster1
 ```
 
 ### Main scenario (remote PNET to TEE over WireGuard)
@@ -55,6 +64,9 @@ Any run with `--source cluster-pnet` (or `--dest cluster-pnet`) will pick up
 `wg0` and write `wg_before.txt` / `wg_after.txt` automatically. The
 per-second `host_metrics.csv` also records `wg0_rx_bytes` / `wg0_tx_bytes`,
 so the WireGuard transfer cost of the migration window is visible.
+`wg show` may require elevated privileges on this host; the wrapper first tries
+plain `wg show`, then `sudo -n wg show`, and always keeps the `ip -s link show
+wg0` counters as best-effort fallback.
 
 ```bash
 scripts/utils/evaluation/run_eval_migration.sh \
@@ -67,11 +79,20 @@ scripts/utils/evaluation/run_eval_migration.sh \
   --load-rps 1 \
   --concurrency 1 \
   --trigger manual \
+  --probe-url http://10.0.0.18:32366/whoami \
+  --probe-interval-ms 1000 \
+  --probe-pre-seconds 30 \
+  --probe-post-seconds 60 \
+  --reset-after-run \
+  --reset-routing-context cluster1 \
+  --reset-source-context cluster-pnet \
+  --reset-subset v1 \
   -- \
   ./scripts/migration/single-migration.sh routing-demo-7c8f6c5b6d-abcde \
     --source-cluster cluster-pnet \
     --dest-cluster cluster-sev-snp \
-    --namespace istio-enabled
+    --namespace istio-enabled \
+    --istio-routing-context cluster1
 ```
 
 > **PNET security-triggered migrations**: the `--trigger falco` value is only
@@ -83,21 +104,130 @@ scripts/utils/evaluation/run_eval_migration.sh \
 > runs as evidence of "Falco-driven PNET migration" unless the PNET-side
 > Falco install can be demonstrated for that run.
 
-## Optional probe and Istio sanity flags (v1.1)
+For the `routing-demo` PNET security scenario, starting an evaluation with
+`--trigger falco`, `--source cluster-pnet` and `--dest cluster-sev-snp`
+publishes a correlated MMT event before the measured migration begins. The
+event is sent from the PNET/source context to the PNET-reachable cluster1
+Kafka listener:
+
+```
+topic: mmt-falco-events
+bootstrap: 192.168.200.11:30094
+```
+
+The event type is `mmt_attack_candidate` and includes `run_id`, `pod_name`
+and a unique `nonce`. The backend `/alert` path records the matching
+`MMT Attack Candidate From Kafka` alert into the evaluation run directory only
+when that nonce appears in the alert payload; it does not start a second
+migration for that correlated evaluation alert. Normal/manual MMT candidate
+alerts without the active evaluation nonce keep the usual behavior and still
+trigger migration according to `config.json`.
+
+### Wrapper-owned vulnerability simulation scenario
+
+Evaluation runs with `--trigger simulate` are reserved for `vuln-spring` and
+`vuln-redis`.
+The backend/UI chooses a real simulation attack (`reverse_shell`,
+`data_destruction` or `log_removal`) and registers the expected Falco rule
+before the wrapper starts the attack via `/simulate`. The matching Falco alert
+is written to `falco_trigger.json` and is not allowed to start a second,
+normal `/alert` migration; the wrapper then runs `single-migration.sh` itself
+so migration timing, logs, snapshots and reset evidence remain owned by the
+evaluation run.
+
+For this mode, run exactly one selected vulnerable workload pod in the source
+namespace. The backend rejects simulation evaluations if multiple running
+pods for that workload are present, because `/simulate` targets the Service
+rather than a specific pod. `vuln-redis` simulations use the Redis Lua sandbox
+escape against the discovered `vuln-redis` NodePort. Manual attacks from the
+Simulation tab are unchanged and still follow normal `/alert` / `config.json`
+behavior.
+
+### Passive workload example
+
+`mmt-probe` does not participate in the external `/whoami` response path, so
+it does not require the routing-demo HTTP probe and does not trigger the
+routing-demo reset by default.
+
+```bash
+scripts/utils/evaluation/run_eval_migration.sh \
+  --run-id 001_mmt_probe_pnet_to_sev \
+  --source cluster-pnet \
+  --dest cluster-sev-snp \
+  --namespace istio-enabled \
+  --workload mmt-probe \
+  --pod mmt-probe-xxxxx \
+  --load-rps 0 \
+  --concurrency 0 \
+  --trigger manual \
+  --no-reset-after-run \
+  -- \
+  ./scripts/migration/single-migration.sh mmt-probe-xxxxx \
+    --source-cluster cluster-pnet \
+    --dest-cluster cluster-sev-snp \
+    --namespace istio-enabled \
+    --istio-routing-context cluster1
+```
+
+## Routing-demo HTTP probe and reset flags (v1.2)
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--probe-url` | (off) | Background `curl` loop → `http_probe.csv` |
+| `--probe-url` | required for `routing-demo` | Cluster1 ingress `/whoami` URL |
 | `--probe-interval-ms` | 500 | Probe period |
 | `--probe-pre-seconds` | 30 | Baseline probing before migration |
 | `--probe-post-seconds` | 60 | Continue probing after migration |
+| `--probe-timeout-ms` | 3000 | Per-request timeout |
+| `--require-routing-demo-probe` | true | Abort routing-demo runs without `--probe-url` |
+| `--no-require-routing-demo-probe` | off | Allow routing-demo runs without a probe |
 | `--expected-initial-subset` | v1 | Warn if `routing-demo` VS subset differs |
 | `--allow-existing-fault` | false | Abort if `.spec.http[0].fault` is already set |
+| `--reset-after-run` | true for routing-demo | Reset routing-demo after evidence collection |
+| `--no-reset-after-run` | off | Disable routing-demo reset |
+| `--reset-routing-context` | cluster1 | Context containing the north-south VirtualService |
+| `--reset-source-context` | `--source` | Context where source routing-demo deployment is restored |
+| `--reset-subset` | v1 | Subset to route to after reset |
+| `--reset-timeout-seconds` | 120 | Source deployment rollout timeout |
 
-Before migration the wrapper writes `pre_run_sanity.txt` (VirtualService YAML,
-source pod, optional single `curl`). If an Istio fault is present and
-`--allow-existing-fault` is not set, the run aborts with exit code `2` and the
-message: `pre-existing Istio fault detected; clear fault before evaluation run`.
+The HTTP probe is **routing-demo-only by default**. For routing-demo runs,
+`--probe-url` must point at the **cluster1 ingress `/whoami` URL** unless
+`--no-require-routing-demo-probe` is set. The probe produces `http_probe.csv`
+and, when parsing succeeds, `http_probe_summary.json`; those files are used
+for client-visible downtime, latency impact and counter-based state
+preservation.
+
+For state-consistency tests, the HTTP probe should be the only client
+incrementing the routing-demo counter. If a separate load generator also
+calls `/whoami`, then `counter_after == counter_before + 1` is no longer a
+valid state-preservation check unless all client requests are logged.
+
+Non-routing-demo workloads such as `mmt-probe` and `vuln-spring` do not
+require `--probe-url`, do not create `http_probe.csv` by default, and do not
+trigger the routing-demo reset by default. `vuln-spring` security timing is
+evaluated from Falco/backend/migration logs rather than the routing-demo
+counter.
+
+Reset is also **routing-demo-only by default**. It is a test-harness cleanup
+step, not part of migration timing: it runs after the HTTP probe post-window,
+after `k8s_after.txt` / `istio_after.yaml`, after checkpoint inspection, and
+after failure diagnostics. Reset uses `cluster1` as the Istio routing context
+by default; for `cluster-pnet -> cluster-sev-snp`, the routing-demo
+VirtualService is still checked and reset in `cluster1`.
+
+Before routing-demo migration the wrapper writes `pre_run_sanity.txt`
+(cluster1 VirtualService YAML, source pod, optional single `curl`). If an
+Istio fault is present and `--allow-existing-fault` is not set, the run aborts
+with exit code `2` and the message:
+`pre-existing Istio fault detected in cluster1 VirtualService; clear fault before evaluation run`.
+
+Resetting to `v1` is only safe if the source routing-demo deployment is
+Running and its Service has ready endpoints. The wrapper scales the source
+deployment to one replica, waits for rollout, checks endpoints, then patches
+only the central VirtualService fields needed to remove a fault and point
+traffic back to `v1`. It does not rewrite the full VirtualService and does
+not delete Services, DestinationRules, Gateways or Deployments. Destination
+`routing-demo-restore-*` pods are deleted only after after-snapshots were
+collected.
 
 Migration output: `migration.stdout.log` (tee of subprocess stdout). The
 timestamped `single-migration.sh` log is copied to `migration.log` via
@@ -111,13 +241,22 @@ For every run a single directory is created (UTC date dir + run id):
 $OUT_ROOT/YYYY-MM-DD/$RUN_ID/
   metadata.json
   pre_run_sanity.txt
-  http_probe.csv              # when --probe-url set
+  http_probe.csv              # routing-demo with --probe-url
+  http_probe_summary.json     # routing-demo with parseable probe CSV
+  falco_event.json            # trigger=falco routing-demo PNET event payload
+  falco_trigger.txt           # trigger=falco producer/wait log
+  falco_trigger.json          # trigger=falco backend alert evidence
+  simulation_trigger.txt      # trigger=simulate /simulate request log
+  simulation_trigger.json     # trigger=simulate request/response evidence
   migration.log               # timestamped single-migration.sh log
   migration.stdout.log        # raw subprocess stdout/stderr                 # tee of stdout+stderr from the migration cmd
   k8s_before.txt / k8s_after.txt
   istio_before.yaml / istio_after.yaml
   host_metrics.csv              # 1Hz; host load, mem, ens3 + wg0 byte counters
   wg_before.txt / wg_after.txt  # only meaningful when wg0 exists
+  reset_after.txt               # routing-demo reset command log
+  reset_after_istio.yaml        # routing-demo reset result
+  reset_after_k8s.txt           # routing-demo source readiness result
   artifact_sizes.txt            # newest checkpoint .tar's + du -sh of root
   checkpoint/
     checkpoint_path.txt
@@ -140,7 +279,8 @@ Columns:
 ```
 run_id,source,dest,namespace,workload,pod,load_rps,concurrency,trigger,
 start_time_utc,end_time_utc,exit_code,run_dir,checkpoint_file,
-http_probe_csv,pre_existing_fault_detected,migration_log_found
+http_probe_csv,pre_existing_fault_detected,migration_log_found,
+reset_after_run,reset_failed,reset_exit_code
 ```
 
 This makes it easy to aggregate runs (`pandas.read_csv` or even `awk`) for

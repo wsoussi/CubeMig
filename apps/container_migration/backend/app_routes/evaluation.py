@@ -10,12 +10,14 @@ import csv
 import json
 import os
 import re
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app_routes.simulation import ATTACK_FALCO_RULES, SUPPORTED_ATTACK_TYPES
 from utils.k8s_client import k8s_client
 
 router = APIRouter()
@@ -25,9 +27,20 @@ EVAL_WRAPPER = CUBEMIG_ROOT / "scripts/utils/evaluation/run_eval_migration.sh"
 MIGRATION_SCRIPT = CUBEMIG_ROOT / "scripts/migration/single-migration.sh"
 DEFAULT_REGISTRY = os.getenv("MIGRATION_REGISTRY", "160.85.255.146:5000")
 PNET_REGISTRY = os.getenv("PNET_WIREGUARD_MIGRATION_REGISTRY", "10.10.10.1:5000")
+DEFAULT_ROUTING_DEMO_PROBE_URL = os.getenv(
+    "ROUTING_DEMO_PROBE_URL",
+    "http://10.0.0.18:32366/whoami",
+)
+DEFAULT_MMT_FALCO_KAFKA_BOOTSTRAP = os.getenv("MMT_FALCO_KAFKA_BOOTSTRAP", "192.168.200.11:30094")
+DEFAULT_MMT_FALCO_KAFKA_TOPIC = os.getenv("MMT_FALCO_KAFKA_TOPIC", "mmt-falco-events")
+DEFAULT_MMT_FALCO_ALERT_TIMEOUT_SECONDS = int(os.getenv("MMT_FALCO_ALERT_TIMEOUT_SECONDS", "60"))
+DEFAULT_SIMULATION_ALERT_TIMEOUT_SECONDS = int(os.getenv("EVAL_SIMULATION_ALERT_TIMEOUT_SECONDS", "60"))
+DEFAULT_SIMULATION_API_URL = os.getenv("EVAL_SIMULATION_API_URL", "http://127.0.0.1:8000/simulate")
+MMT_FALCO_RULE = "MMT Attack Candidate From Kafka"
 
-VALID_WORKLOADS = frozenset({"routing-demo", "mmt-probe", "vuln-spring"})
+VALID_WORKLOADS = frozenset({"routing-demo", "mmt-probe", "vuln-spring", "vuln-redis"})
 VALID_TRIGGERS = frozenset({"manual", "falco", "simulate"})
+SIMULATION_WORKLOADS = frozenset({"vuln-spring", "vuln-redis"})
 
 # Keys: ``YYYY-MM-DD/run_id`` while the wrapper subprocess is running.
 active_eval_runs: dict[str, dict] = {}
@@ -46,6 +59,12 @@ class EvaluationStartRequest(BaseModel):
     out_root: str | None = None
     checkpoint_root: str | None = None
     registry_address: str | None = None
+    probe_url: str | None = None
+    falco_kafka_bootstrap: str | None = None
+    falco_kafka_topic: str | None = None
+    falco_alert_timeout_seconds: int = Field(default=DEFAULT_MMT_FALCO_ALERT_TIMEOUT_SECONDS, ge=1)
+    simulation_attack_type: str | None = None
+    simulation_alert_timeout_seconds: int = Field(default=DEFAULT_SIMULATION_ALERT_TIMEOUT_SECONDS, ge=1)
     istio_routing_context: str = "cluster1"
     skip_cpu_compat_check: bool = True
     cleanup_incompatible_mounts: bool | None = None
@@ -67,8 +86,18 @@ TEXT_ARTIFACTS: tuple[str, ...] = (
     "istio_before.yaml",
     "istio_after.yaml",
     "host_metrics.csv",
+    "http_probe.csv",
+    "http_probe_summary.json",
+    "falco_event.json",
+    "falco_trigger.txt",
+    "falco_trigger.json",
+    "simulation_trigger.txt",
+    "simulation_trigger.json",
     "wg_before.txt",
     "wg_after.txt",
+    "reset_after.txt",
+    "reset_after_istio.yaml",
+    "reset_after_k8s.txt",
     "artifact_sizes.txt",
     "failure_diagnostics.txt",
     "checkpoint/checkpoint_path.txt",
@@ -132,6 +161,47 @@ def _heterogeneous_dest(dest: str) -> bool:
     return normalized in ("cluster-pnet", "pnet", "cluster-sev-snp", "sev-snp")
 
 
+def _is_mmt_falco_evaluation(body: EvaluationStartRequest) -> bool:
+    return (
+        body.trigger == "falco"
+        and body.workload == "routing-demo"
+        and body.source == "cluster-pnet"
+        and body.dest == "cluster-sev-snp"
+    )
+
+
+def _is_simulation_evaluation(body: EvaluationStartRequest) -> bool:
+    return body.trigger == "simulate" and body.workload in SIMULATION_WORKLOADS
+
+
+def _running_workload_pods(cluster: str, namespace: str, workload: str) -> list[str]:
+    client_api = k8s_client.get_client(cluster)
+    try:
+        pod_list = client_api.list_namespaced_pod(namespace=namespace, label_selector=f"app={workload}")
+        pods = [
+            pod.metadata.name
+            for pod in pod_list.items
+            if pod.metadata and pod.metadata.name and pod.status and pod.status.phase == "Running"
+        ]
+    except Exception:
+        pods = []
+    if pods:
+        return sorted(pods)
+
+    pod_list = client_api.list_namespaced_pod(namespace=namespace)
+    return sorted(
+        pod.metadata.name
+        for pod in pod_list.items
+        if (
+            pod.metadata
+            and pod.metadata.name
+            and pod.metadata.name.startswith(workload)
+            and pod.status
+            and pod.status.phase == "Running"
+        )
+    )
+
+
 def _validate_start_request(body: EvaluationStartRequest) -> None:
     if body.source == body.dest:
         raise HTTPException(status_code=400, detail="source and dest must be different")
@@ -139,6 +209,15 @@ def _validate_start_request(body: EvaluationStartRequest) -> None:
         raise HTTPException(status_code=400, detail=f"workload must be one of: {sorted(VALID_WORKLOADS)}")
     if body.trigger not in VALID_TRIGGERS:
         raise HTTPException(status_code=400, detail=f"trigger must be one of: {sorted(VALID_TRIGGERS)}")
+    if body.trigger == "simulate" and body.workload not in SIMULATION_WORKLOADS:
+        raise HTTPException(status_code=400, detail="trigger=simulate is only supported for workload=vuln-spring or workload=vuln-redis")
+    if _is_simulation_evaluation(body):
+        attack_type = (body.simulation_attack_type or "").strip()
+        if attack_type not in SUPPORTED_ATTACK_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"simulation_attack_type must be one of: {sorted(SUPPORTED_ATTACK_TYPES)}",
+            )
     if not k8s_client.has_cluster(body.source):
         raise HTTPException(status_code=400, detail=f"Unknown source cluster: {body.source}")
     if not k8s_client.has_cluster(body.dest):
@@ -149,6 +228,17 @@ def _validate_start_request(body: EvaluationStartRequest) -> None:
         raise HTTPException(status_code=500, detail=f"Evaluation wrapper not found: {EVAL_WRAPPER}")
     if not MIGRATION_SCRIPT.is_file():
         raise HTTPException(status_code=500, detail=f"Migration script not found: {MIGRATION_SCRIPT}")
+    if _is_simulation_evaluation(body):
+        running = _running_workload_pods(body.source, body.namespace, body.workload)
+        if len(running) != 1 or running[0] != body.pod:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Simulation evaluations require exactly one running {body.workload} pod in the selected "
+                    f"source namespace, and it must be the selected pod. Found: {running or 'none'}. "
+                    f"Scale {body.workload} to 1 and refresh the pod selection before starting."
+                ),
+            )
 
 
 def _build_migration_argv(body: EvaluationStartRequest, registry: str, run_dir: Path) -> list[str]:
@@ -186,7 +276,14 @@ def _build_migration_argv(body: EvaluationStartRequest, registry: str, run_dir: 
     return cmd
 
 
-def _build_wrapper_argv(body: EvaluationStartRequest, run_id: str, out_root: Path, ckpt_root: Path) -> list[str]:
+def _build_wrapper_argv(
+    body: EvaluationStartRequest,
+    run_id: str,
+    out_root: Path,
+    ckpt_root: Path,
+    falco_nonce: str | None = None,
+) -> list[str]:
+    routing_context = (body.istio_routing_context or "cluster1").strip() or "cluster1"
     argv = [
         str(EVAL_WRAPPER),
         "--run-id",
@@ -212,9 +309,37 @@ def _build_wrapper_argv(body: EvaluationStartRequest, run_id: str, out_root: Pat
         "--checkpoint-root",
         str(ckpt_root),
         "--istio-routing-context",
-        (body.istio_routing_context or "cluster1").strip() or "cluster1",
-        "--",
+        routing_context,
     ]
+    if body.workload == "routing-demo":
+        probe_url = (body.probe_url or "").strip() or DEFAULT_ROUTING_DEMO_PROBE_URL
+        if probe_url:
+            argv.extend(["--probe-url", probe_url])
+        argv.extend(["--reset-routing-context", routing_context])
+    if _is_mmt_falco_evaluation(body):
+        argv.extend([
+            "--falco-trigger-kafka-bootstrap",
+            (body.falco_kafka_bootstrap or "").strip() or DEFAULT_MMT_FALCO_KAFKA_BOOTSTRAP,
+            "--falco-trigger-topic",
+            (body.falco_kafka_topic or "").strip() or DEFAULT_MMT_FALCO_KAFKA_TOPIC,
+            "--falco-trigger-timeout-seconds",
+            str(body.falco_alert_timeout_seconds),
+            "--falco-trigger-nonce",
+            falco_nonce or "",
+        ])
+    if _is_simulation_evaluation(body):
+        attack_type = (body.simulation_attack_type or "").strip()
+        argv.extend([
+            "--simulation-attack-type",
+            attack_type,
+            "--simulation-expected-rule",
+            ATTACK_FALCO_RULES.get(attack_type, ""),
+            "--simulation-alert-timeout-seconds",
+            str(body.simulation_alert_timeout_seconds),
+            "--simulation-api-url",
+            DEFAULT_SIMULATION_API_URL,
+        ])
+    argv.append("--")
     registry = (body.registry_address or "").strip() or _default_registry(body.dest)
     run_dir = out_root / datetime.now(timezone.utc).strftime("%Y-%m-%d") / run_id
     argv.extend(_build_migration_argv(body, registry, run_dir))
@@ -233,6 +358,7 @@ def _tail_file(path: Path, max_lines: int = 30) -> list[str]:
 
 async def _run_evaluation_subprocess(key: str, argv: list[str], run_dir: Path) -> None:
     pod_name = active_eval_runs.get(key, {}).get("pod", "")
+    falco_correlation_id = active_eval_runs.get(key, {}).get("falco_correlation_id")
     try:
         process = await asyncio.create_subprocess_exec(
             *argv,
@@ -248,6 +374,10 @@ async def _run_evaluation_subprocess(key: str, argv: list[str], run_dir: Path) -
         active_eval_runs[key]["error"] = str(exc)
     finally:
         active_eval_runs[key]["status"] = "finished"
+        if falco_correlation_id:
+            from app_routes.migration import unregister_pending_eval_falco_alert
+
+            unregister_pending_eval_falco_alert(falco_correlation_id)
         if pod_name:
             from app_routes.migration import activeMigrations
 
@@ -273,7 +403,9 @@ async def start_evaluation(body: EvaluationStartRequest):
     if key in active_eval_runs:
         raise HTTPException(status_code=409, detail=f"Evaluation run already in progress: {run_id}")
 
-    argv = _build_wrapper_argv(body, run_id, out_root, ckpt_root)
+    falco_nonce = f"{run_id}-{secrets.token_hex(8)}" if _is_mmt_falco_evaluation(body) else None
+    simulation_correlation_id = f"{run_id}-simulation-{secrets.token_hex(8)}" if _is_simulation_evaluation(body) else None
+    argv = _build_wrapper_argv(body, run_id, out_root, ckpt_root, falco_nonce)
     sep_idx = argv.index("--") if "--" in argv else len(argv)
     active_eval_runs[key] = {
         "status": "running",
@@ -285,6 +417,38 @@ async def start_evaluation(body: EvaluationStartRequest):
         "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "argv_preview": " ".join(argv[: min(sep_idx + 3, len(argv))]) + (" …" if len(argv) > sep_idx + 3 else ""),
     }
+    if falco_nonce:
+        active_eval_runs[key]["falco_nonce"] = falco_nonce
+        active_eval_runs[key]["falco_correlation_id"] = falco_nonce
+        from app_routes.migration import register_pending_eval_falco_alert
+
+        register_pending_eval_falco_alert(
+            run_id=run_id,
+            run_dir=str(run_dir),
+            pod=body.pod,
+            namespace=body.namespace,
+            source_cluster=body.source,
+            workload=body.workload,
+            rule=MMT_FALCO_RULE,
+            nonce=falco_nonce,
+        )
+    if simulation_correlation_id:
+        active_eval_runs[key]["falco_correlation_id"] = simulation_correlation_id
+        from app_routes.migration import register_pending_eval_falco_alert
+
+        attack_type = (body.simulation_attack_type or "").strip()
+        register_pending_eval_falco_alert(
+            run_id=run_id,
+            run_dir=str(run_dir),
+            pod=body.pod,
+            namespace=body.namespace,
+            source_cluster=body.source,
+            workload=body.workload,
+            rule=ATTACK_FALCO_RULES[attack_type],
+            correlation_id=simulation_correlation_id,
+            timeout_seconds=body.simulation_alert_timeout_seconds,
+            allow_missing_k8s_metadata=True,
+        )
     # Migration tab polls activeMigrations / contMigration_logs — point it at this run dir.
     from app_routes.migration import activeMigrations
 

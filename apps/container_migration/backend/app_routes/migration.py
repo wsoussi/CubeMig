@@ -1,5 +1,5 @@
-from fastapi import APIRouter, HTTPException
-from datetime import datetime
+from fastapi import APIRouter, HTTPException, Request
+from datetime import datetime, timedelta
 import json
 import os
 import asyncio
@@ -17,6 +17,7 @@ router = APIRouter()
 
 triggeredMigrations = []
 activeMigrations: dict[str, str] = {}
+pending_eval_falco_alerts: dict[str, dict] = {}
 base_log_path = "/home/ubuntu/contMigration_logs"
 config = load_config()
 timezone = pytz.timezone('Europe/Berlin')
@@ -85,6 +86,155 @@ def _apply_rule_config_to_info(info: MigrationInfo, rule_config, namespace: str)
         info.skip_cpu_compat_check = True
     if rule_config.cleanup_incompatible_mounts:
         info.cleanup_incompatible_mounts = True
+
+def _utc_now_iso() -> str:
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+def register_pending_eval_falco_alert(
+    *,
+    run_id: str,
+    run_dir: str,
+    pod: str,
+    namespace: str,
+    source_cluster: str,
+    workload: str,
+    rule: str,
+    nonce: str | None = None,
+    correlation_id: str | None = None,
+    timeout_seconds: int = 60,
+    allow_missing_k8s_metadata: bool = False,
+) -> None:
+    """Register an evaluation-owned Falco/MMT alert correlation.
+
+    Matching alerts are written into the evaluation run directory and do not
+    launch a second migration. Nonce-based registrations require the nonce to
+    appear in the alert. Non-nonce registrations are limited by exact
+    rule/pod/namespace plus a short timeout window, unless explicitly allowed
+    to accept missing Kubernetes metadata for wrapper-owned simulations.
+    """
+    key = correlation_id or nonce
+    if not key:
+        raise ValueError("pending eval alert requires nonce or correlation_id")
+    timeout = max(int(timeout_seconds or 60), 1)
+    registered_at = datetime.utcnow()
+    pending_eval_falco_alerts[key] = {
+        "run_id": run_id,
+        "run_dir": run_dir,
+        "pod": pod,
+        "namespace": namespace,
+        "source_cluster": source_cluster,
+        "workload": workload,
+        "rule": rule,
+        "nonce": nonce,
+        "correlation_id": key,
+        "registered_at_utc": registered_at.replace(microsecond=0).isoformat() + "Z",
+        "expires_at_utc": (registered_at + timedelta(seconds=timeout)).replace(microsecond=0).isoformat() + "Z",
+        "allow_missing_k8s_metadata": allow_missing_k8s_metadata,
+    }
+
+def unregister_pending_eval_falco_alert(correlation_id: str | None) -> None:
+    if correlation_id:
+        pending_eval_falco_alerts.pop(correlation_id, None)
+
+def _alert_contains_nonce(alert: Alert, nonce: str, raw_body: str = "") -> bool:
+    if not nonce:
+        return False
+    if raw_body and nonce in raw_body:
+        return True
+    try:
+        raw = json.dumps(alert.model_dump(by_alias=True), sort_keys=True, default=str)
+    except Exception:
+        raw = str(alert)
+    return nonce in raw
+
+def _clean_alert_text(value: str | None) -> str:
+    text = (value or "").strip()
+    if text in {"<NA>", "N/A", "null", "None"}:
+        return ""
+    return text
+
+def _record_pending_eval_falco_alert(alert: Alert, pod_name: str, namespace: str, rule_name: str, raw_body: str = ""):
+    """Return a response dict if this alert belongs to an evaluation run."""
+    now = datetime.utcnow()
+    observed_pod = _clean_alert_text(pod_name)
+    observed_namespace = _clean_alert_text(namespace)
+    for correlation_id, pending in list(pending_eval_falco_alerts.items()):
+        expires_at = pending.get("expires_at_utc")
+        if expires_at:
+            try:
+                expires = datetime.fromisoformat(str(expires_at).replace("Z", "+00:00")).replace(tzinfo=None)
+                if now > expires:
+                    pending_eval_falco_alerts.pop(correlation_id, None)
+                    continue
+            except Exception:
+                pass
+        if pending.get("rule") != rule_name:
+            continue
+        expected_pod = _clean_alert_text(pending.get("pod"))
+        expected_namespace = _clean_alert_text(pending.get("namespace") or "default") or "default"
+        allow_missing_metadata = bool(pending.get("allow_missing_k8s_metadata"))
+        pod_metadata_missing = not observed_pod
+        namespace_metadata_missing = not observed_namespace
+        if observed_pod and expected_pod != observed_pod:
+            continue
+        if not observed_pod and not allow_missing_metadata:
+            continue
+        if observed_namespace and expected_namespace != observed_namespace:
+            continue
+        if not observed_namespace and not allow_missing_metadata:
+            continue
+
+        nonce = pending.get("nonce")
+        if nonce and not _alert_contains_nonce(alert, nonce, raw_body):
+            continue
+
+        received_at = _utc_now_iso()
+        run_dir = pending.get("run_dir") or ""
+        relaxed_metadata_match = allow_missing_metadata and (pod_metadata_missing or namespace_metadata_missing)
+        evidence = {
+            "run_id": pending.get("run_id"),
+            "run_dir": run_dir,
+            "pod": observed_pod or expected_pod,
+            "namespace": observed_namespace or expected_namespace,
+            "observed_pod": observed_pod or None,
+            "observed_namespace": observed_namespace or None,
+            "expected_pod": expected_pod,
+            "expected_namespace": expected_namespace,
+            "missing_k8s_metadata_accepted": relaxed_metadata_match,
+            "source_cluster": pending.get("source_cluster"),
+            "workload": pending.get("workload"),
+            "rule": rule_name,
+            "nonce": nonce,
+            "correlation_id": correlation_id,
+            "registered_at_utc": pending.get("registered_at_utc"),
+            "expires_at_utc": pending.get("expires_at_utc"),
+            "alert_received_at_utc": received_at,
+            "alert": alert.model_dump(by_alias=True),
+            "raw_alert_body": raw_body,
+        }
+        if run_dir:
+            os.makedirs(run_dir, exist_ok=True)
+            with open(os.path.join(run_dir, "falco_trigger.json"), "w", encoding="utf-8") as file:
+                json.dump(evidence, file, indent=2, sort_keys=True, default=str)
+                file.write("\n")
+            with open(os.path.join(run_dir, "falco_trigger.txt"), "a", encoding="utf-8") as file:
+                file.write(f"Matched MMT/Falco evaluation alert at {received_at}\n")
+                file.write(
+                    f"rule={rule_name} pod={observed_namespace or expected_namespace}/{observed_pod or expected_pod} "
+                    f"correlation_id={correlation_id}\n"
+                )
+                if relaxed_metadata_match:
+                    file.write("Accepted alert with missing Kubernetes pod/namespace metadata for active evaluation simulation\n")
+        pending_eval_falco_alerts.pop(correlation_id, None)
+        return {
+            "message": "Evaluation Falco alert recorded",
+            "detail": "Matched active evaluation alert; migration remains owned by evaluation wrapper",
+            "run_id": pending.get("run_id"),
+            "run_dir": run_dir,
+            "nonce": nonce,
+            "correlation_id": correlation_id,
+        }
+    return None
 
 def _extract_return_code(content: str):
     for line in content.splitlines():
@@ -292,7 +442,22 @@ def _attach_stage_durations_ms(stages: list, log_lines: list):
                 "-- Post-checkpoint: stop source workload",
                 "--- Stopping source workload",
             ),
-            ("-- Convert checkpoint into image",),
+            (
+                "-- Checkpoint mount normalization enabled",
+                "-- Checkpoint mount normalization disabled",
+                "-- Convert checkpoint into image",
+            ),
+        ),
+        "checkpoint_normalization": lambda lines: _duration_ms_between_markers(
+            lines,
+            (
+                "-- Checkpoint mount normalization enabled",
+                "-- Checkpoint mount normalization disabled",
+            ),
+            (
+                "-- Checkpoint normalization completed",
+                "-- Convert checkpoint into image",
+            ),
         ),
         "image": lambda lines: _duration_ms_between_markers(
             lines,
@@ -338,7 +503,7 @@ def _attach_stage_durations_ms(stages: list, log_lines: list):
 
 def _build_stage_statuses(log_lines, final_status: str):
     # Order matches single-migration.sh: checks → dest prep → checkpoint → **stop source on source**
-    # (replicas 0 / delete) → image → optional checkpoint pre-pull → restore → traffic → finalize script.
+    # (replicas 0 / delete) → checkpoint normalization → image → optional checkpoint pre-pull → restore → traffic → finalize script.
     stages = [
         {"key": "pipeline_check", "label": "Pipeline checks", "status": "pending"},
         {
@@ -350,6 +515,11 @@ def _build_stage_statuses(log_lines, final_status: str):
         {
             "key": "source_stop_post_checkpoint",
             "label": "Source scaled down (post-checkpoint)",
+            "status": "pending",
+        },
+        {
+            "key": "checkpoint_normalization",
+            "label": "Checkpoint normalization",
             "status": "pending",
         },
         {"key": "image", "label": "Image conversion and push", "status": "pending"},
@@ -391,42 +561,55 @@ def _build_stage_statuses(log_lines, final_status: str):
         "--- Stopping source workload" in joined and "Convert checkpoint into image" not in joined
     ):
         stages[3]["status"] = "running"
-    if "Convert checkpoint into image" in joined or "Pushing image" in joined:
+    if (
+        "Checkpoint mount normalization" in joined
+        or "Convert checkpoint into image" in joined
+        or "Pushing image" in joined
+    ):
         stages[3]["status"] = "completed"
 
-    if "Convert checkpoint into image" in joined or "Pushing image" in joined:
+    if "Checkpoint mount normalization enabled" in joined:
         stages[4]["status"] = "running"
-    if "Image pushed onto local registy" in joined or "Image pushed onto local registry" in joined:
+    if (
+        "Checkpoint normalization completed" in joined
+        or "Checkpoint mount normalization disabled" in joined
+        or "Convert checkpoint into image" in joined
+    ):
         stages[4]["status"] = "completed"
 
-    if "Pre-pull step (checkpoint image) started" in joined:
+    if "Convert checkpoint into image" in joined or "Pushing image" in joined:
         stages[5]["status"] = "running"
+    if "Image pushed onto local registy" in joined or "Image pushed onto local registry" in joined:
+        stages[5]["status"] = "completed"
+
+    if "Pre-pull step (checkpoint image) started" in joined:
+        stages[6]["status"] = "running"
     if (
         "Pre-pull step (checkpoint image) completed" in joined
         or "Pre-pull step (checkpoint image) skipped by feature flag" in joined
     ):
-        stages[5]["status"] = "completed"
-
-    if "Applying restore yaml file" in joined or "Waiting for the new pod" in joined:
-        stages[6]["status"] = "running"
-    if " is running --" in joined:
         stages[6]["status"] = "completed"
 
-    if "-- Traffic switch step completed --" in joined:
-        stages[7]["status"] = "completed"
-    elif "Traffic switch skipped (restore pod not running)" in joined:
-        stages[7]["status"] = "completed"
-    elif "switching mirroring rule" in joined or "Switching traffic to the new pod" in joined:
+    if "Applying restore yaml file" in joined or "Waiting for the new pod" in joined:
         stages[7]["status"] = "running"
+    if " is running --" in joined:
+        stages[7]["status"] = "completed"
+
+    if "-- Traffic switch step completed --" in joined:
+        stages[8]["status"] = "completed"
+    elif "Traffic switch skipped (restore pod not running)" in joined:
+        stages[8]["status"] = "completed"
+    elif "switching mirroring rule" in joined or "Switching traffic to the new pod" in joined:
+        stages[8]["status"] = "running"
 
     traffic_done = (
         "-- Traffic switch step completed --" in joined
         or "Traffic switch skipped (restore pod not running)" in joined
     )
     if traffic_done and "-- Source workload cleanup completed --" not in joined:
-        stages[8]["status"] = "running"
+        stages[9]["status"] = "running"
     if "-- Source workload cleanup completed --" in joined:
-        stages[8]["status"] = "completed"
+        stages[9]["status"] = "completed"
 
     # Older migration logs (checkpoint before destination prep) lack dest_prep markers.
     if (
@@ -609,22 +792,30 @@ def _collect_recent_migrations(limit: int, offset: int):
     return paged_items, total, has_more
 
 @router.post("/alert")
-async def handle_alerts(alert: Alert):
+async def handle_alerts(alert: Alert, request: Request):
     reload_config()
-
-    if not alert.output_fields:
-        raise HTTPException(status_code=400, detail="output_fields required (k8s.pod.name, container.name)")
-
-    pod_name = (alert.output_fields.k8s_pod_name or "").strip()
-    if not pod_name:
-        raise HTTPException(status_code=400, detail="output_fields.k8s.pod.name is required")
-
-    namespace = (alert.output_fields.k8s_ns_name or "default").strip()
-    container_name = alert.output_fields.container_name
+    raw_alert_body = (await request.body()).decode("utf-8", errors="replace")
 
     rule_name = (alert.rule or "").strip()
     if not rule_name:
         raise HTTPException(status_code=400, detail="rule is required")
+
+    output_fields = alert.output_fields
+    pod_name = _clean_alert_text(output_fields.k8s_pod_name if output_fields else None)
+    namespace = _clean_alert_text(output_fields.k8s_ns_name if output_fields else None)
+    container_name = output_fields.container_name if output_fields else None
+
+    eval_match = _record_pending_eval_falco_alert(alert, pod_name, namespace, rule_name, raw_alert_body)
+    if eval_match is not None:
+        return eval_match
+
+    if not output_fields:
+        raise HTTPException(status_code=400, detail="output_fields required (k8s.pod.name, container.name)")
+
+    if not pod_name:
+        raise HTTPException(status_code=400, detail="output_fields.k8s.pod.name is required")
+
+    namespace = namespace or "default"
 
     if pod_name in triggeredMigrations:
         return {

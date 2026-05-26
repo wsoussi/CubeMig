@@ -56,6 +56,12 @@ export interface EvaluationStartRequest {
   concurrency: number;
   trigger: string;
   registry_address?: string;
+  probe_url?: string;
+  falco_kafka_bootstrap?: string;
+  falco_kafka_topic?: string;
+  falco_alert_timeout_seconds?: number;
+  simulation_attack_type?: string;
+  simulation_alert_timeout_seconds?: number;
   istio_routing_context?: string;
   skip_cpu_compat_check?: boolean;
   cleanup_incompatible_mounts?: boolean | null;

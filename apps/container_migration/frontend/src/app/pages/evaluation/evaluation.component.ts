@@ -24,6 +24,7 @@ import {
   EvaluationService,
   EvaluationStartRequest
 } from '../../service/evaluation.service';
+import { AttackRuleMapping, SimulationService } from '../../service/simulation.service';
 
 @Component({
   selector: 'app-evaluation',
@@ -47,12 +48,18 @@ export class EvaluationComponent implements OnInit, OnDestroy {
   workloadOptions: SelectItem[] = [
     { label: 'routing-demo', value: 'routing-demo' },
     { label: 'mmt-probe', value: 'mmt-probe' },
-    { label: 'vuln-spring', value: 'vuln-spring' }
+    { label: 'vuln-spring', value: 'vuln-spring' },
+    { label: 'vuln-redis', value: 'vuln-redis' }
   ];
   triggerOptions: SelectItem[] = [
     { label: 'manual', value: 'manual' },
     { label: 'falco', value: 'falco' },
     { label: 'simulate', value: 'simulate' }
+  ];
+  simulationAttackOptions: SelectItem[] = [
+    { label: 'Reverse shell', value: 'reverse_shell' },
+    { label: 'Data destruction', value: 'data_destruction' },
+    { label: 'Log file removal', value: 'log_removal' }
   ];
   podOptions: SelectItem[] = [];
 
@@ -64,6 +71,7 @@ export class EvaluationComponent implements OnInit, OnDestroy {
   formLoadRps = 1;
   formConcurrency = 1;
   formTrigger = 'manual';
+  formSimulationAttackType = 'reverse_shell';
   formRunId = '';
   formRegistry = this.defaultPublicRegistry;
   formIstioRoutingContext = 'cluster1';
@@ -104,25 +112,30 @@ export class EvaluationComponent implements OnInit, OnDestroy {
   selectedArtifactTruncated = false;
   selectedArtifactSize: number | null = null;
   loadingFile = false;
+  simulationAttackRuleMapping: AttackRuleMapping[] = [];
 
   private artifactPriority: Record<string, number> = {
     'metadata.json': 0,
     'migration.log': 1,
     'failure_diagnostics.txt': 2,
-    'host_metrics.csv': 3,
-    'k8s_before.txt': 4,
-    'k8s_after.txt': 5,
-    'istio_before.yaml': 6,
-    'istio_after.yaml': 7,
-    'wg_before.txt': 8,
-    'wg_after.txt': 9,
-    'artifact_sizes.txt': 10,
-    'checkpoint/checkpoint_path.txt': 11,
-    'checkpoint/checkpoint_stat.txt': 12,
-    'checkpoint/checkpoint_sha256.txt': 13,
-    'checkpoint/checkpoint_tar_listing.txt': 14,
-    'checkpoint/checkpointctl_show.txt': 15,
-    'checkpoint/checkpointctl_inspect.txt': 16
+    'falco_trigger.json': 3,
+    'falco_trigger.txt': 4,
+    'simulation_trigger.json': 5,
+    'simulation_trigger.txt': 6,
+    'host_metrics.csv': 7,
+    'k8s_before.txt': 8,
+    'k8s_after.txt': 9,
+    'istio_before.yaml': 10,
+    'istio_after.yaml': 11,
+    'wg_before.txt': 12,
+    'wg_after.txt': 13,
+    'artifact_sizes.txt': 14,
+    'checkpoint/checkpoint_path.txt': 15,
+    'checkpoint/checkpoint_stat.txt': 16,
+    'checkpoint/checkpoint_sha256.txt': 17,
+    'checkpoint/checkpoint_tar_listing.txt': 18,
+    'checkpoint/checkpointctl_show.txt': 19,
+    'checkpoint/checkpointctl_inspect.txt': 20
   };
 
   private destroy$ = new Subject<void>();
@@ -130,6 +143,7 @@ export class EvaluationComponent implements OnInit, OnDestroy {
 
   constructor(
     private evaluationService: EvaluationService,
+    private simulationService: SimulationService,
     private k8sService: K8sService,
     private messageService: MessageService
   ) {}
@@ -137,6 +151,7 @@ export class EvaluationComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.loadClusters();
     this.refreshRuns();
+    this.loadSimulationAttackMapping();
     this.applyDestDefaults();
   }
 
@@ -216,6 +231,10 @@ export class EvaluationComponent implements OnInit, OnDestroy {
     return n === 'pnet' || n === 'cluster-pnet' || n === 'sev-snp' || n === 'cluster-sev-snp';
   }
 
+  private isSimulationWorkload(workload: string): boolean {
+    return workload === 'vuln-spring' || workload === 'vuln-redis';
+  }
+
   private loadPods(): void {
     if (!this.formSource || !this.formNamespace) {
       this.podOptions = [];
@@ -227,8 +246,8 @@ export class EvaluationComponent implements OnInit, OnDestroy {
     ).subscribe((response: PodsResponse) => {
       const pods = response.pods || [];
       let filtered = pods.filter((p) => p.status === 'Running');
-      if (this.formWorkload === 'vuln-spring') {
-        filtered = filtered.filter((p) => (p.appName || '').startsWith('vuln-spring'));
+      if (this.formWorkload === 'vuln-spring' || this.formWorkload === 'vuln-redis') {
+        filtered = filtered.filter((p) => (p.appName || '').startsWith(this.formWorkload));
       } else if (this.formWorkload === 'routing-demo') {
         filtered = filtered.filter((p) => (p.appName || '').includes('routing-demo'));
       } else if (this.formWorkload === 'mmt-probe') {
@@ -245,7 +264,41 @@ export class EvaluationComponent implements OnInit, OnDestroy {
   }
 
   public onWorkloadChange(): void {
+    if (this.formTrigger === 'simulate' && !this.isSimulationWorkload(this.formWorkload)) {
+      this.formTrigger = 'manual';
+    }
+    this.formPod = '';
     this.loadPods();
+  }
+
+  public onTriggerChange(): void {
+    if (this.formTrigger === 'simulate') {
+      if (!this.isSimulationWorkload(this.formWorkload)) {
+        this.formWorkload = 'vuln-spring';
+      }
+      this.formPod = '';
+      if (!this.formSimulationAttackType) {
+        this.formSimulationAttackType = 'reverse_shell';
+      }
+      this.loadPods();
+    }
+  }
+
+  private loadSimulationAttackMapping(): void {
+    this.simulationService.getAttackRuleMapping().pipe(
+      take(1),
+      catchError(() => of([] as AttackRuleMapping[]))
+    ).subscribe((mapping) => {
+      this.simulationAttackRuleMapping = mapping;
+    });
+  }
+
+  public get expectedSimulationFalcoRule(): string {
+    if (!(this.formTrigger === 'simulate' && this.isSimulationWorkload(this.formWorkload))) {
+      return '';
+    }
+    const found = this.simulationAttackRuleMapping.find((entry) => entry.attackType === this.formSimulationAttackType);
+    return found?.falcoRule || '';
   }
 
   public suggestRunId(): void {
@@ -266,6 +319,7 @@ export class EvaluationComponent implements OnInit, OnDestroy {
       this.formNamespace &&
       this.formWorkload &&
       this.formPod &&
+      (this.formTrigger !== 'simulate' || (this.isSimulationWorkload(this.formWorkload) && !!this.formSimulationAttackType)) &&
       !this.startingRun &&
       this.activeRunStatus !== 'running'
     );
@@ -294,6 +348,7 @@ export class EvaluationComponent implements OnInit, OnDestroy {
       load_rps: this.formLoadRps,
       concurrency: this.formConcurrency,
       trigger: this.formTrigger,
+      simulation_attack_type: this.formTrigger === 'simulate' ? this.formSimulationAttackType : undefined,
       registry_address: (this.formRegistry || '').trim() || undefined,
       istio_routing_context: this.formIstioRoutingContext || this.getDefaultIstioRoutingContext(),
       skip_cpu_compat_check: this.formSkipCpuCompatCheck,

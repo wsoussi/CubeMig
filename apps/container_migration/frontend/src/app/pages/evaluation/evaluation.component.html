@@ -41,13 +41,28 @@
                 </div>
                 <div class="field col-12 md:col-3">
                     <label class="block mb-2">Trigger</label>
-                    <p-dropdown [options]="triggerOptions" [(ngModel)]="formTrigger" [style]="{'width':'100%'}"></p-dropdown>
+                    <p-dropdown [options]="triggerOptions" [(ngModel)]="formTrigger" (onChange)="onTriggerChange()" [style]="{'width':'100%'}"></p-dropdown>
                 </div>
                 <div class="field col-12 md:col-3">
                     <label class="block mb-2">Run ID (optional)</label>
                     <input pInputText type="text" [(ngModel)]="formRunId" placeholder="auto-generated" class="w-full" />
                 </div>
             </div>
+
+            @if (formTrigger === 'simulate' && (formWorkload === 'vuln-spring' || formWorkload === 'vuln-redis')) {
+                <div class="p-formgrid grid">
+                    <div class="field col-12 md:col-6">
+                        <label class="block mb-2">Simulation attack</label>
+                        <p-dropdown [options]="simulationAttackOptions" [(ngModel)]="formSimulationAttackType" placeholder="Select attack type" [style]="{'width':'100%'}"></p-dropdown>
+                    </div>
+                    @if (expectedSimulationFalcoRule) {
+                        <div class="field col-12 md:col-6">
+                            <label class="block mb-2">Expected Falco rule</label>
+                            <code>{{ expectedSimulationFalcoRule }}</code>
+                        </div>
+                    }
+                </div>
+            }
 
             <div class="mb-3">
                 <label class="block mb-2">Registry (host:port)</label>

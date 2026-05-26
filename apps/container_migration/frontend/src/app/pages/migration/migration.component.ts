@@ -846,6 +846,11 @@ export class MigrationComponent implements OnInit, OnDestroy{
         label: 'Source scaled down (post-checkpoint)',
         status: runningKey === 'source_stop_post_checkpoint' ? runningState : 'pending'
       },
+      {
+        key: 'checkpoint_normalization',
+        label: 'Checkpoint normalization',
+        status: runningKey === 'checkpoint_normalization' ? runningState : 'pending'
+      },
       { key: 'image', label: 'Image conversion and push', status: runningKey === 'image' ? runningState : 'pending' },
       {
         key: 'checkpoint_prepull',

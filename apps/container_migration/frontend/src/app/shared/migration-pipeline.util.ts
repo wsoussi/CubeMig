@@ -17,6 +17,7 @@ export function createDefaultMigrationStages(
       label: 'Source scaled down (post-checkpoint)',
       status: statusFor('source_stop_post_checkpoint')
     },
+    { key: 'checkpoint_normalization', label: 'Checkpoint normalization', status: statusFor('checkpoint_normalization') },
     { key: 'image', label: 'Image conversion and push', status: statusFor('image') },
     {
       key: 'checkpoint_prepull',
