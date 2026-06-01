@@ -31,9 +31,9 @@ spec:
             - name: svc_election
               value: "true"
             - name: cp_namespace
-              value: "kube-system"
+              value: kube-system
             - name: vip_interface
-              value: "ens3"
+              value: ens3
           securityContext:
             capabilities:
               add:

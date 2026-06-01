@@ -3,7 +3,7 @@ global:
   multiCluster:
     clusterName: cluster2
   network: network2
-  remotePilotAddress: 10.0.0.29
+  remotePilotAddress: 10.0.0.50
 istiodRemote:
   injectionPath: /inject/cluster/cluster2/net/network2
 profile: remote

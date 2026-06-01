@@ -1,12 +1,8 @@
----
 apiVersion: v1
 kind: Service
 metadata:
-  annotations:
-    kube-vip.io/loadbalancerIPs: 10.0.0.60
-    kube-vip.io/vipHost: worker3
-    meta.helm.sh/release-name: istio-eastwestgateway
-    meta.helm.sh/release-namespace: istio-system
+  name: istio-eastwestgateway
+  namespace: istio-system
   labels:
     app: istio-eastwestgateway
     app.kubernetes.io/instance: istio-eastwestgateway
@@ -18,34 +14,37 @@ metadata:
     istio: eastwestgateway
     istio.io/dataplane-mode: none
     topology.istio.io/network: network2
-  name: istio-eastwestgateway
-  namespace: istio-system
+  annotations:
+    kube-vip.io/loadbalancerIPs: 10.0.0.60
+    kube-vip.io/vipHost: worker3
+    meta.helm.sh/release-name: istio-eastwestgateway
+    meta.helm.sh/release-namespace: istio-system
 spec:
-  allocateLoadBalancerNodePorts: true
-  externalTrafficPolicy: Cluster
-  internalTrafficPolicy: Cluster
-  ipFamilies:
-  - IPv4
-  ipFamilyPolicy: SingleStack
-  ports:
-  - name: status-port
-    port: 15021
-    protocol: TCP
-    targetPort: 15021
-  - name: tls
-    port: 15443
-    protocol: TCP
-    targetPort: 15443
-  - name: tls-istiod
-    port: 15012
-    protocol: TCP
-    targetPort: 15012
-  - name: tls-webhook
-    port: 15017
-    protocol: TCP
-    targetPort: 15017
+  type: LoadBalancer
   selector:
     app: istio-eastwestgateway
     istio: eastwestgateway
+  ports:
+    - name: status-port
+      protocol: TCP
+      port: 15021
+      targetPort: 15021
+    - name: tls
+      protocol: TCP
+      port: 15443
+      targetPort: 15443
+    - name: tls-istiod
+      protocol: TCP
+      port: 15012
+      targetPort: 15012
+    - name: tls-webhook
+      protocol: TCP
+      port: 15017
+      targetPort: 15017
   sessionAffinity: None
-  type: LoadBalancer
+  allocateLoadBalancerNodePorts: true
+  externalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  internalTrafficPolicy: Cluster

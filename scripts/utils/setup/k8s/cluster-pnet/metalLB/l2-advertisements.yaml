@@ -31,11 +31,11 @@ spec:
 apiVersion: metallb.io/v1beta1
 kind: L2Advertisement
 metadata:
-  name: open5gs-upf
+  name: open5gs-upf1
   namespace: metallb-system
 spec:
   ipAddressPools:
-    - open5gs-upf
+    - open5gs-upf1
   nodeSelectors:
     - matchLabels:
         kubernetes.io/hostname: edge1-worker-1

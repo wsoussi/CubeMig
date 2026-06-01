@@ -1,0 +1,27 @@
+data:
+  meshNetworks: |-
+    networks:
+      network1:
+        endpoints:
+          - fromRegistry: cluster1
+        gateways:
+          - address: 10.0.0.50
+            port: 15443
+      network2:
+        endpoints:
+          - fromRegistry: cluster2
+        gateways:
+          - address: 10.0.0.60
+            port: 15443
+      network3:
+        endpoints:
+          - fromRegistry: cluster-sev-snp
+        gateways:
+          - address: 160.85.255.9
+            port: 30930
+      network4:
+        endpoints:
+          - fromRegistry: cluster-pnet
+        gateways:
+          - address: 10.1.6.76
+            port: 15443

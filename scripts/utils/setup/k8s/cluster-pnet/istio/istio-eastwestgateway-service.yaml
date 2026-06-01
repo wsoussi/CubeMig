@@ -17,8 +17,8 @@ metadata:
   annotations:
     meta.helm.sh/release-name: istio-eastwestgateway
     meta.helm.sh/release-namespace: istio-system
-    metallb.universe.tf/address-pool: istio
-    metallb.universe.tf/loadBalancerIPs: 10.1.6.76
+    metallb.io/address-pool: istio
+    metallb.io/loadBalancerIPs: 10.1.6.76
 spec:
   type: LoadBalancer
   selector:
