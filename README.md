@@ -1,79 +1,97 @@
 # CubeMig: Container live migration in Kubernetes
 
-A comprehensive container migration platform that enables live migration of Kubernetes pods between clusters using CRIU (Checkpoint/Restore in Userspace) technology. The system includes automated threat detection, forensic analysis, and AI-powered security assessments.
+A container migration demo platform that enables migration of Kubernetes pods between clusters using CRIU (Checkpoint/Restore in Userspace). CubeMig includes a web UI, a FastAPI backend, Istio-aware routing support, Falco alert handling, evaluation tooling, and demo workloads for testing migration scenarios.
+
+This project is intended for controlled research and lab environments. A real migration requires Kubernetes clusters prepared with CRI-O, CRIU, shared checkpoint storage, and a reachable image registry.
 
 ## 🚀 Features
 
-- **Live Container Migration**: Seamless pod migration between Kubernetes clusters with minimal downtime
-- **CRIU Integration**: Uses CRIU for checkpoint/restore functionality
-- **Web-based Management**: Angular frontend with FastAPI backend for easy migration management
-- **Security Monitoring**: Falco integration for threat detection and automated migration triggers
-- **Forensic Analysis**: Automated security analysis of migrated containers
-- **AI Security Assessment**: AI-powered suggestions for security improvements
-- **TEE Support**: Trusted Execution Environment migration capabilities
-- **Multi-cluster Support**: Migration between different Kubernetes clusters
+- **Live Container Migration**: Move Kubernetes pods between clusters with CRIU checkpoints
+- **CRIU Integration**: Checkpoint and restore container state with CRI-O
+- **Web-based Management**: Angular frontend with FastAPI backend
+- **Istio Routing Demo**: Keep one client-facing endpoint while traffic moves
+- **Security Monitoring**: Falco alerts can log events or trigger migration
+- **Forensic Analysis**: Optional analysis hooks for migrated containers
+- **AI Security Assessment**: Optional AI-assisted security suggestions
+- **TEE Support**: Migration workflows for confidential-computing experiments
+- **Evaluation Runs**: Capture logs, timing, HTTP probe results, and evidence
 
-## 🏗️ Architecture
+## 🏗️ Project Structure
 
-```
+```text
 CubeMig/
 ├── apps/
 │   ├── container_migration/
 │   │   ├── frontend/          # Angular web interface
 │   │   └── backend/           # FastAPI REST API
 │   └── kubernetes/            # Demo applications
+│       ├── routing_demo/
+│       ├── mmt-probe/
+│       ├── vuln-redis/
+│       ├── vuln-spring/
 │       ├── cpu_intensive/
 │       ├── mem_intensive/
-│       ├── disk_rw_intensive/
-│       ├── nginx/
-│       ├── vuln-redis/
-│       └── vuln-spring/
+│       └── disk_rw_intensive/
 ├── scripts/
 │   ├── migration/             # Migration automation scripts
-│   └── utils/                 # Utility scripts for setup and analysis
-└── docs/                      # Documentation and meeting notes
+│   └── utils/
+│       ├── evaluation/         # Evaluation wrapper and evidence collection
+│       └── setup/              # Worker, CRIU, Istio, kube-vip, MetalLB helpers
+└── docs/                      # Thesis notes and supporting material
 ```
 
 ## 🛠️ Technology Stack
 
-### Backend (FastAPI)
-- **Framework**: FastAPI with Python 3.10+
-- **Dependencies**: 
-  - `fastapi==0.115.2` - Modern web framework
-  - `uvicorn==0.32.0` - ASGI server
-  - `kubernetes==31.0.0` - Kubernetes Python client
-- **Features**:
-  - RESTful API for migration operations
-  - Kubernetes cluster management
-  - Falco alert processing
-  - Forensic analysis integration
-  - AI-powered security assessments
+### Backend
 
-### Frontend (Angular)
-- **Framework**: Angular CLI v17.3.11
-- **Features**:
-  - Real-time migration monitoring
-  - Cluster and pod management interface
-  - Migration history and logs
-  - Security analysis results display
+- **Framework**: FastAPI with Python 3.10+
+- **Server**: Uvicorn
+- **Kubernetes access**: Kubernetes Python client
+- **Responsibilities**:
+  - Start manual migrations
+  - Receive Falco alerts
+  - List clusters and pods
+  - Store alert/migration configuration
+  - Expose logs and evaluation runs
+
+### Frontend
+
+- **Framework**: Angular 17
+- **UI Features**:
+  - Migration form
+  - Cluster and pod selection
+  - Migration pipeline monitoring
+  - Log browser
+  - Attack simulation controls
+  - Evaluation run view
 
 ### Infrastructure
-- **Container Runtime**: CRI-O with CRIU support
-- **Orchestration**: Kubernetes multi-cluster setup
-- **Image Registry**: Local container registry
-- **Storage**: NFS for checkpoint persistence
-- **Security**: Falco for runtime threat detection
+
+- **Runtime**: CRI-O with CRIU support
+- **Storage**: Shared checkpoint storage, commonly NFS
+- **Registry**: Local or lab registry for checkpoint images
+- **Routing**: Istio multi-cluster routing for demos
+- **Security**: Falco runtime alerts
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-- Kubernetes clusters (minimum 2) with CRI-O runtime
-- CRIU-enabled nodes
-- NFS storage for checkpoint sharing
-- Docker/Podman with Buildah
-- Node.js 18+ and npm
+For local development:
+
 - Python 3.10+
+- Node.js 18+
+- npm
+- `kubectl`
+
+For real migrations:
+
+- Kubernetes clusters, minimum 2
+- CRI-O runtime with CRIU support
+- CRIU-enabled source and destination nodes
+- Shared checkpoint storage
+- Reachable image registry, e.g. `<registry-host>:5000`
+- Kubeconfig contexts matching the cluster names used in the UI/scripts
 
 ### Installation
 
@@ -83,219 +101,304 @@ CubeMig/
    cd CubeMig
    ```
 
-2. **Setup Backend**
+2. **Start the backend**
    ```bash
    cd apps/container_migration/backend
+   python3 -m venv .venv
+   source .venv/bin/activate
    pip install -r requirements.txt
    python3 main.py
    ```
-   Backend will be available at `http://localhost:8000`
 
-3. **Setup Frontend**
+   Backend will be available at `http://localhost:8000`.
+
+3. **Start the frontend**
    ```bash
    cd apps/container_migration/frontend
    npm install
-   ng serve
+   npm start
    ```
-   Frontend will be available at `http://localhost:4200`
+
+   Frontend will be available at `http://localhost:4200`.
+
+4. **Open the API documentation**
+   ```text
+   http://localhost:8000/docs
+   ```
+
+## 📸 Screenshots
+
+Screenshots are helpful for an open-source README, but they should focus on **how to use the demo**, not on setup commands.
+
+Recommended screenshots:
+
+| Screenshot | What to show |
+| --- | --- |
+| `docs/assets/screenshots/overview.png` | Overview page with clusters or pods loaded |
+| `docs/assets/screenshots/migration-form.png` | Manual migration form before starting a run |
+| `docs/assets/screenshots/migration-running.png` | Migration pipeline while it is running |
+| `docs/assets/screenshots/logs.png` | Logs page with a migration log selected |
+| `docs/assets/screenshots/evaluation.png` | Evaluation run details or HTTP probe results |
+
+Use sanitized demo data. Do not include real public IPs, tokens, private hostnames, kubeconfigs, or sensitive logs.
+
+## 🎬 Guided Demo
+
+The recommended demo workload is `routing-demo`:
+
+```text
+apps/kubernetes/routing_demo
+```
+
+It exposes:
+
+```http
+GET /whoami
+```
+
+The response includes the serving cluster, version, and in-memory counter. This makes it easy to see when traffic moves after migration.
+
+### Demo Flow
+
+1. **Open the UI**
+   - Navigate to `http://localhost:4200`
+   - Confirm the backend is reachable
+
+2. **Select the source pod**
+   - Go to the migration page
+   - Select the source cluster
+   - Select the namespace
+   - Select the running pod
+
+3. **Configure the migration**
+   - Choose the destination cluster
+   - Set optional flags such as forensic analysis or AI suggestion
+   - Confirm the registry value is correct
+
+4. **Start the migration**
+   - Click migrate
+   - Watch the pipeline status and backend logs
+
+5. **Verify traffic**
+   - Call the stable application endpoint before and after migration:
+     ```bash
+     curl http://<cluster-ingress-host>:<port>/whoami
+     ```
+   - The response should show the restored workload or target version, depending on the Istio routing setup
 
 ## 📋 Usage
 
-### Manual Migration
+### Manual Migration From The UI
 
-1. **Access the Web Interface**: Navigate to `http://localhost:4200`
-2. **Select Source Pod**: Choose a pod from the source cluster
-3. **Configure Migration**: Select target cluster and migration options
-4. **Enable Security Features** (optional):
-   - Forensic Analysis: Analyze container for security issues
-   - AI Suggestions: Get AI-powered security recommendations
-5. **Execute Migration**: Click migrate and monitor progress
-
-### Automated Migration
-
-The system can automatically trigger migrations based on Falco security alerts:
-
-```json
-{
-    "rule": "Read sensitive file untrusted",
-    "cluster": "cluster1", 
-    "action": "migrate",
-    "targetCluster": "cluster2",
-    "forensic_analysis": true,
-    "AI_suggestion": true
-}
-```
+1. Access the web interface at `http://localhost:4200`
+2. Select a source cluster and pod
+3. Select a target cluster
+4. Configure optional migration settings
+5. Execute the migration and monitor the pipeline
+6. Check logs and verify the application endpoint
 
 ### CLI Migration
 
 For direct script execution:
 
 ```bash
-# Basic migration
-./scripts/migration/single-migration.sh <pod-name>
-
-# Migration with forensic analysis
-./scripts/migration/single-migration.sh <pod-name> --forensic-analysis
-
-# Migration with AI suggestions
-./scripts/migration/single-migration.sh <pod-name> --forensic-analysis --ai-suggestion
+./scripts/migration/single-migration.sh <pod-name> \
+  --source-cluster cluster1 \
+  --dest-cluster cluster2 \
+  --namespace istio-enabled \
+  --registry <registry-host>:5000 \
+  --istio-routing-context cluster1
 ```
+
+Common options:
+
+- `--forensic-analysis`: run forensic analysis hooks
+- `--ai-suggestion`: request AI-assisted analysis
+- `--disable-istio-sidecar`: restore without Istio sidecar injection
+- `--skip-cpu-compat-check`: skip CPU compatibility validation
+- `--cleanup-incompatible-mounts`: clean known problematic mounts before checkpoint
+
+Print all options:
+
+```bash
+./scripts/migration/single-migration.sh --help
+```
+
+### Automated Migration With Falco
+
+Falco can send alerts to the backend:
+
+```text
+POST /alert
+```
+
+The backend checks `apps/container_migration/backend/config.json` and decides whether to log the alert or trigger migration.
+
+Example configuration shape:
+
+```json
+{
+  "rule": "Read sensitive file untrusted",
+  "cluster": "cluster1",
+  "action": "migrate",
+  "targetCluster": "cluster2",
+  "registry_address": "<registry-host>:5000",
+  "forensic_analysis": false,
+  "AI_suggestion": false
+}
+```
+
+You can also demonstrate this from the frontend. Open the **Simulation** page, choose a vulnerable workload/scenario, and start the simulation. The frontend calls the backend simulation route, the simulated attack produces the expected alert path, and the configured rule can trigger an automated migration.
+
+### Evaluation Run
+
+The evaluation wrapper captures migration evidence around a normal migration:
+
+```bash
+scripts/utils/evaluation/run_eval_migration.sh \
+  --run-id demo_run \
+  --source cluster1 \
+  --dest cluster2 \
+  --namespace istio-enabled \
+  --workload routing-demo \
+  --pod <routing-demo-pod> \
+  --trigger manual \
+  --probe-url http://<cluster-ingress-host>:<port>/whoami \
+  --reset-after-run \
+  -- \
+  scripts/migration/single-migration.sh <routing-demo-pod> \
+    --source-cluster cluster1 \
+    --dest-cluster cluster2 \
+    --namespace istio-enabled \
+    --registry <registry-host>:5000 \
+    --istio-routing-context cluster1
+```
+
+The wrapper can collect:
+
+- Kubernetes snapshots before and after migration
+- Istio routing state
+- migration logs
+- checkpoint metadata
+- HTTP probe results
+- host metrics
+- reset evidence for demo workloads
 
 ## 🔧 Migration Process
 
 1. **Checkpoint Creation**: CRIU creates a checkpoint of the running container
-2. **Image Building**: Checkpoint is packaged into a new container image
-3. **Registry Push**: Image is pushed to the container registry
-4. **Cluster Switch**: Context switches to destination cluster
-5. **Image Pre-pull**: Ensures original base image is available
-6. **Pod Restoration**: New pod is created from the checkpoint image
-7. **Validation**: Verifies successful migration and pod health
-8. **Cleanup**: Removes old pod and manages checkpoint storage
-
-## 🔒 Security Features
-
-### Threat Detection
-- **Falco Integration**: Real-time detection of suspicious activities
-- **Configurable Rules**: Custom security rules for different scenarios
-- **Automated Response**: Automatic migration triggers on security events
-
-### Forensic Analysis
-- **Container Inspection**: Detailed analysis of container state
-- **File System Changes**: Detection of modifications and additions
-- **Process Analysis**: Examination of running processes and connections
-
-### AI Security Assessment
-- **Groq API Integration**: Leverages LLaMA model for security analysis
-- **Vulnerability Assessment**: Identifies potential security issues
-- **Remediation Suggestions**: Provides actionable security recommendations
-- **Attack Hypothesis**: Generates theories about potential attacks
+2. **Image Building**: The checkpoint is packaged into a checkpoint image
+3. **Registry Push**: The image is pushed to the configured registry
+4. **Destination Restore**: The destination cluster pulls and restores the pod
+5. **Routing Update**: Istio routing is checked or adjusted for demo workloads
+6. **Validation**: Logs, pod state, and application responses are checked
+7. **Cleanup**: Temporary resources and old pod state are cleaned up where configured
 
 ## 🧪 Demo Applications
 
-The repository includes several demo applications for testing:
+- **routing-demo**: Main Istio migration demo with `/whoami`
+- **mmt-probe**: MMT/Kafka-backed event flow workload
+- **vuln-redis**: Vulnerable Redis workload for security simulations
+- **vuln-spring**: Vulnerable Spring workload for security simulations
+- **CPU Intensive**: CPU benchmark workloads
+- **Memory Intensive**: Memory benchmark workloads
+- **Disk I/O Intensive**: Disk benchmark workloads
+- **Nginx / Flask**: Simple web service examples
 
-- **CPU Intensive**: High CPU usage applications
-- **Memory Intensive**: Applications with large memory footprints  
-- **Disk I/O Intensive**: Applications with heavy disk operations
-- **Vulnerable Applications**: 
-  - `vuln-redis`: Redis with known vulnerabilities
-  - `vuln-spring`: Spring Boot application with security issues
-- **Web Services**: Nginx and various web applications
+## ⚙️ Kubernetes Setup Files
 
-## 📊 Performance Monitoring
+Cluster setup examples live in:
 
-The system tracks detailed performance metrics:
+```text
+scripts/utils/setup/k8s
+```
 
-- **Checkpoint Creation Time**: Time to create CRIU checkpoint
-- **Image Build Time**: Time to build checkpoint image
-- **Network Transfer Time**: Time to push/pull images
-- **Pod Startup Time**: Time for pod to become ready
-- **Total Migration Time**: End-to-end migration duration
+Important folders:
 
-Results are logged and available through the web interface.
+- `cluster1/istio`: primary Istio and routing-demo resources
+- `cluster1/kube-vip`: kube-vip setup
+- `cluster2/istio`: remote Istio values and gateway Service
+- `cluster2/kube-vip`: kube-vip setup
+- `cluster-pnet/metallb`: MetalLB pools and L2 advertisements
+- `cluster-pnet/network`: PNET routing/NAT helper
+
+These files are examples for a lab topology. Review addresses, node names, namespaces, and Helm values before applying them.
 
 ## 🔧 Configuration
 
-### Backend Configuration (`backend/config.json`)
-```json
-{
-    "config": [
-        {
-            "rule": "Security Rule Name",
-            "cluster": "source-cluster", 
-            "action": "migrate|log",
-            "targetCluster": "destination-cluster",
-            "forensic_analysis": true|false,
-            "AI_suggestion": true|false
-        }
-    ]
-}
+### Backend Configuration
+
+Main config file:
+
+```text
+apps/container_migration/backend/config.json
 ```
+
+It maps Falco rules to actions such as `log` or `migrate`.
 
 ### Environment Variables
-Create `.env` file in `scripts/migration/`:
+
+Create `.env` in `scripts/migration/` for local-only values:
+
 ```bash
-GROQ_API_KEY=your_groq_api_key
+MIGRATION_REGISTRY=<registry-host>:5000
+ISTIO_ROUTING_CONTEXT=cluster1
+GROQ_API_KEY=<optional-api-key>
 ```
 
-## 🚀 Development
+Do not commit `.env`.
 
-### Backend Development
-```bash
-cd apps/container_migration/backend
-# Install dependencies
-pip install -r requirements.txt
-# Run with auto-reload
-python3 main.py
-```
+## 🆘 Troubleshooting
 
-### Frontend Development  
-```bash
-cd apps/container_migration/frontend
-# Install dependencies
-npm install
-# Serve with live reload
-ng serve
-# Build for production
-ng build
-```
+### Migration fails with image or pull errors
 
+- Check that the registry is reachable from the migration host and destination cluster
+- Confirm the registry address matches `--registry` or `MIGRATION_REGISTRY`
+- Check destination pod events with `kubectl describe pod`
 
+### CRIU checkpoint fails
 
-## 📚 API Documentation
+- Verify CRIU is installed
+- Verify CRI-O checkpoint support is enabled
+- Check source node permissions and checkpoint storage
+- Confirm the workload is compatible with CRIU
 
-Once the backend is running, visit `http://localhost:8000/docs` for interactive API documentation.
+### Restored pod does not start
 
-### Key Endpoints
-- `POST /migrate` - Trigger manual migration
-- `POST /alert` - Process Falco security alerts
-- `GET /migration-status/{pod_name}` - Check migration status
-- `GET /k8s/pods/{cluster}` - List pods in cluster
-- `GET /logs/{type}` - Retrieve system logs
+- Check CPU, kernel, cgroup, and mount compatibility
+- Check image pull errors
+- Check destination cluster events and pod logs
 
-## 👥 Contributors
+### UI cannot load clusters or pods
 
-- **Michael Azhari Meier** - Core Development
-- **Rinchen Kolodziejczyk** - Core Development  
-- **Anthony John Mamaril** - Core Development
-- **Wissem Soussi** - Core Development
+- Confirm the backend is running
+- Confirm kubeconfig contexts are available to the backend process
+- Open `http://localhost:8000/docs` and test the Kubernetes endpoints
+
+### Logs and debugging
+
+- Backend logs: terminal running `python3 main.py`
+- Frontend logs: browser developer console
+- Migration logs: generated by the migration script
+- Kubernetes logs: `kubectl logs <pod-name>`
 
 ## 🤝 Contributing
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+2. Create a feature branch
+3. Make a focused change
+4. Run the relevant checks
+5. Open a pull request with sanitized logs or screenshots if needed
+
+## 👥 Contributors
+
+- **Michael Azhari Meier** - Core Development
+- **Rinchen Kolodziejczyk** - Core Development
+- **Anthony John Mamaril** - Core Development
+- **Wissem Soussi** - Core Development
+- **Zino Scalia** - Core Development
+- **Harun Ibushoski** - Core Development
 
 ## 📝 License
 
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
-
-## 🆘 Troubleshooting
-
-### Common Issues
-
-1. **Migration Fails with "Image Not Found"**
-   - Ensure original base image is available in destination cluster
-   - Check registry connectivity and credentials
-
-2. **CRIU Checkpoint Fails**
-   - Verify CRIU is properly installed and configured
-   - Check if application is CRIU-compatible
-   - Ensure proper permissions on checkpoint storage
-
-3. **Pod Won't Start After Migration**
-   - Check resource availability in destination cluster
-   - Verify network policies and security contexts
-   - Review pod logs for specific errors
-
-### Logs and Debugging
-- Backend logs: Check terminal where `python3 main.py` is running
-- Frontend logs: Browser developer console
-- Migration logs: `/home/ubuntu/contMigration_logs/`
-- Kubernetes logs: `kubectl logs <pod-name>`
-
----
-
-**Note**: This project demonstrates advanced container migration techniques and should be used in controlled environments. Ensure proper security measures are in place before deploying in production scenarios.
+This project is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
