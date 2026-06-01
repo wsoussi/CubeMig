@@ -1,0 +1,28 @@
+customRules:
+  zz_ba_noise_filters.yaml: |-
+    - rule: Contact K8S API Server From Container
+      override:
+        condition: append
+      condition: >
+        and not (
+          k8s.ns.name = "kube-flannel" and
+          container.name = "kube-flannel" and
+          proc.name = "flanneld"
+        )
+
+    - rule: Packet socket created in container
+      override:
+        condition: append
+      condition: >
+        and not (
+          k8s.ns.name = "kube-system" and
+          container.name = "kube-vip" and
+          proc.name = "kube-vip"
+        )
+falco:
+  http_output:
+    enabled: true
+    url: http://160.85.255.146:8000/alert
+  json_include_output_property: true
+  json_output: true
+json_include_output_property: true

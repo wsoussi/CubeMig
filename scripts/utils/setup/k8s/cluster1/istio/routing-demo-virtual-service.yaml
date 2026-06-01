@@ -1,0 +1,36 @@
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: routing-demo
+  namespace: istio-enabled
+spec:
+  gateways:
+    - routing-demo-gateway
+  hosts:
+    - "*"
+  http:
+    - match:
+        - uri:
+            prefix: /whoami
+      route:
+        - destination:
+            host: routing-demo.istio-enabled.svc.cluster.local
+            port:
+              number: 80
+            subset: v1
+          weight: 100
+      mirrors:
+        - destination:
+            host: routing-demo.istio-enabled.svc.cluster.local
+            port:
+              number: 80
+            subset: v1-monitor
+          percentage:
+            value: 100
+        - destination:
+            host: routing-demo.istio-enabled.svc.cluster.local
+            port:
+              number: 80
+            subset: v2-monitor
+          percentage:
+            value: 100

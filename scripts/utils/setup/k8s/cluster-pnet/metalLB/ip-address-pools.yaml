@@ -1,0 +1,59 @@
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: grafana
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.1.6.75/32
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: istio
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.1.6.76/32
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: open5gs-amf
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.1.6.73/32
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: open5gs-upf1
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.1.6.71/32
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: open5gs-upf2
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.1.6.72/32
+  autoAssign: false
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: open5gs-webui
+  namespace: metallb-system
+spec:
+  addresses:
+    - 10.1.6.74/32
+  autoAssign: false

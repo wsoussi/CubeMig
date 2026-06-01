@@ -1,0 +1,9 @@
+global:
+  configCluster: true
+  multiCluster:
+    clusterName: cluster-pnet
+  network: network4
+  remotePilotAddress: 10.0.0.50
+istiodRemote:
+  injectionPath: /inject/cluster/cluster-pnet/net/network4
+profile: remote

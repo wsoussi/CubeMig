@@ -1,0 +1,2 @@
+name: istio-eastwestgateway
+networkGateway: network1

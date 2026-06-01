@@ -1,0 +1,16 @@
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: routing-demo-gateway
+  namespace: istio-enabled
+spec:
+  selector:
+    app: istio-ingress
+    istio: ingress
+  servers:
+    - hosts:
+        - "*"
+      port:
+        name: http
+        number: 80
+        protocol: HTTP

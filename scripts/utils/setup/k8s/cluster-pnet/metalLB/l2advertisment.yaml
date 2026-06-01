@@ -1,0 +1,62 @@
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: grafana
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - grafana
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: istio
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - istio
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: open5gs-amf
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - open5gs-amf
+  nodeSelectors:
+    - matchLabels:
+        kubernetes.io/hostname: core-master-1
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: open5gs-upf
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - open5gs-upf
+  nodeSelectors:
+    - matchLabels:
+        kubernetes.io/hostname: edge1-worker-1
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: open5gs-upf2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - open5gs-upf2
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: open5gs-webui
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - open5gs-webui
+  nodeSelectors:
+    - matchLabels:
+        kubernetes.io/hostname: core-master-1

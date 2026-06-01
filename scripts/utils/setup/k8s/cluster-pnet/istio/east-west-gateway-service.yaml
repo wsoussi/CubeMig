@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: istio-eastwestgateway
+  namespace: istio-system
+  labels:
+    app: istio-eastwestgateway
+    app.kubernetes.io/instance: istio-eastwestgateway
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: istio-eastwestgateway
+    app.kubernetes.io/part-of: istio
+    app.kubernetes.io/version: 1.27.2
+    helm.sh/chart: gateway-1.27.2
+    istio: eastwestgateway
+    istio.io/dataplane-mode: none
+    topology.istio.io/network: network4
+  annotations:
+    meta.helm.sh/release-name: istio-eastwestgateway
+    meta.helm.sh/release-namespace: istio-system
+    metallb.universe.tf/address-pool: istio
+    metallb.universe.tf/loadBalancerIPs: 10.1.6.76
+spec:
+  type: LoadBalancer
+  selector:
+    app: istio-eastwestgateway
+    istio: eastwestgateway
+  ports:
+    - name: status-port
+      protocol: TCP
+      port: 15021
+      targetPort: 15021
+    - name: tls
+      protocol: TCP
+      port: 15443
+      targetPort: 15443
+    - name: tls-istiod
+      protocol: TCP
+      port: 15012
+      targetPort: 15012
+    - name: tls-webhook
+      protocol: TCP
+      port: 15017
+      targetPort: 15017
+  sessionAffinity: None
+  externalTrafficPolicy: Cluster
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+  allocateLoadBalancerNodePorts: true
+  internalTrafficPolicy: Cluster

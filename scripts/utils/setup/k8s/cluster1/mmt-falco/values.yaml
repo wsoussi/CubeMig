@@ -1,0 +1,98 @@
+collectors:
+  enabled: false
+controller:
+  deployment:
+    replicas: 1
+  kind: deployment
+customRules:
+  mmt_rules.yaml: |-
+    - rule: MMT Attack Candidate From Kafka
+      desc: MMT attack-triggered migration candidate event received from Kafka
+      source: kafka
+      condition: >
+        jevt.value[/event_type] = "mmt_attack_candidate"
+        and jevt.value[/workload] = "routing-demo"
+      output: >
+        MMT migration trigger
+        pod=%jevt.value[/pod_name]
+        namespace=%jevt.value[/namespace]
+        container=%jevt.value[/container_name]
+        workload=%jevt.value[/workload]
+        source_cluster=%jevt.value[/source_cluster]
+        target_cluster=%jevt.value[/target_cluster]
+        reason=%jevt.value[/reason]
+        nonce=%jevt.value[/nonce]
+      priority: CRITICAL
+      tags:
+      - mmt
+      - migration-trigger
+driver:
+  enabled: false
+falco:
+  append_output:
+  - extra_fields:
+    - k8s.pod.name: '%jevt.value[/pod_name]'
+    - k8s.ns.name: '%jevt.value[/namespace]'
+    - container.name: '%jevt.value[/container_name]'
+    match:
+      rule: MMT Attack Candidate From Kafka
+  json_output: true
+  load_plugins:
+  - kafka
+  - json
+  log_level: debug
+  plugins:
+  - init_config: |
+      {
+        "brokers": ["160.85.255.221:30092"],
+        "topics": ["mmt-falco-events"],
+        "groupId": "mmt-falco"
+      }
+    library_path: libkafka.so
+    name: kafka
+    open_params: ""
+  - init_config: ""
+    library_path: libjson.so
+    name: json
+  plugins_hostinfo: false
+  priority: debug
+  rules_files:
+  - /etc/falco/rules.d
+  stdout_output:
+    enabled: true
+falcoctl:
+  artifact:
+    follow:
+      enabled: false
+    install:
+      enabled: true
+  config:
+    artifact:
+      allowedTypes:
+      - rulesfile
+      - plugin
+      follow:
+        every: 168h
+        falcoversions: http://localhost:8765/versions
+        pluginsDir: /plugins
+        refs: []
+        rulesfilesDir: /rulesfiles
+        stateDir: /artifactstate
+      install:
+        pluginsDir: /plugins
+        refs:
+        - kafka
+        - json
+        resolveDeps: true
+        rulesfilesDir: /rulesfiles
+        stateDir: /artifactstate
+falcosidekick:
+  config:
+    webhook:
+      address: http://160.85.255.146:8000/alert
+      minimumpriority: critical
+  enabled: true
+  webui:
+    enabled: false
+fullnameOverride: mmt-falco
+tty: true

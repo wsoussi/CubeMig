@@ -1,0 +1,6 @@
+global:
+  externalIstiod: true
+  meshID: mesh1
+  multiCluster:
+    clusterName: cluster1
+  network: network1

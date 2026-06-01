@@ -1,0 +1,9 @@
+global:
+  configCluster: true
+  multiCluster:
+    clusterName: cluster-sev-snp
+  network: network3
+  remotePilotAddress: 160.85.255.221
+istiodRemote:
+  injectionPath: /inject/cluster/cluster-sev-snp/net/network3
+profile: remote
