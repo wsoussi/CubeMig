@@ -1,25 +1,48 @@
 from kubernetes import client, config
-from utils.constants import CLUSTER_1, CLUSTER_2, CLUSTER_SEV_SNP
+from kubernetes.config.config_exception import ConfigException
 
 class K8sClient:
     def __init__(self, kube_config_path: str):
-        config.load_kube_config(config_file=kube_config_path)
-        self.client1 = client.CoreV1Api(
-            api_client=config.new_client_from_config(context=CLUSTER_1))
-        self.client2 = client.CoreV1Api(
-            api_client=config.new_client_from_config(context=CLUSTER_2))
-        self.client_sev_snp = client.CoreV1Api(
-            api_client=config.new_client_from_config(context=CLUSTER_SEV_SNP))
-        self.active_client = self.client1
+        self.kube_config_path = kube_config_path
+        self.clients = {}
+        self._refresh_clients()
+
+    def _refresh_clients(self):
+        self.clients = {}
+        try:
+            contexts, _ = config.list_kube_config_contexts(config_file=self.kube_config_path)
+        except ConfigException as exc:
+            raise RuntimeError(f"Failed to read kube contexts from {self.kube_config_path}: {str(exc)}") from exc
+
+        if not contexts:
+            raise RuntimeError(f"No Kubernetes contexts found in {self.kube_config_path}")
+
+        for context in contexts:
+            context_name = context.get("name")
+            if not context_name:
+                continue
+            self.clients[context_name] = client.CoreV1Api(
+                api_client=config.new_client_from_config(
+                    config_file=self.kube_config_path,
+                    context=context_name
+                )
+            )
 
     def get_client(self, target_cluster: str):
-        if target_cluster == CLUSTER_1:
-            return self.client1
-        elif target_cluster == CLUSTER_2:
-            return self.client2
-        elif target_cluster == CLUSTER_SEV_SNP:
-            return self.client_sev_snp
-        else:
+        # Keep contexts in sync with kubeconfig changes without requiring backend restart.
+        self._refresh_clients()
+        client_for_cluster = self.clients.get(target_cluster)
+        if not client_for_cluster:
             raise ValueError(f"Invalid cluster choice: {target_cluster}")
+        return client_for_cluster
+
+    def list_clusters(self):
+        # Refresh before listing so newly added contexts appear in the UI.
+        self._refresh_clients()
+        return sorted(self.clients.keys())
+
+    def has_cluster(self, cluster_name: str):
+        self._refresh_clients()
+        return cluster_name in self.clients
 
 k8s_client = K8sClient('/home/ubuntu/.kube/config')

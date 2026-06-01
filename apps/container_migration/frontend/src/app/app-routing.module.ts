@@ -7,6 +7,7 @@ import {ConfigComponent} from './pages/config/config.component';
 import { AppLayoutComponent } from './layout/app.layout.component';
 import { SimulationComponent } from './pages/simulation/simulation.component';
 import { TeeEncapsulationComponent } from './pages/tee-encapsulation/tee-encapsulation.component';
+import { EvaluationComponent } from './pages/evaluation/evaluation.component';
 
 const routes: Routes = [
   {
@@ -16,6 +17,7 @@ const routes: Routes = [
       { path: 'migration', component: MigrationComponent },
       { path: 'simulation', component: SimulationComponent },
       { path: 'tee-encapsulation', component: TeeEncapsulationComponent },
+      { path: 'evaluation', component: EvaluationComponent },
       { path: 'logs', component: LogsComponent },
       { path: 'config', component: ConfigComponent}
     ]

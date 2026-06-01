@@ -1,0 +1,49 @@
+.expected-rule-hint {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  font-size: 0.9rem;
+
+  code {
+    font-size: 0.85rem;
+  }
+}
+
+.last-attack {
+  border-radius: 8px;
+  background: var(--surface-ground);
+  padding: 0.75rem 0.85rem;
+  border-left: 4px solid #f59e0b;
+
+  .last-attack-header {
+    display: flex;
+    align-items: center;
+    margin-bottom: 0.5rem;
+  }
+
+  .last-attack-body {
+    font-size: 0.9rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+
+    .label {
+      font-weight: 600;
+      margin-right: 0.35rem;
+    }
+
+    p {
+      margin: 0.5rem 0 0;
+    }
+  }
+}
+
+::ng-deep tr.rule-match-row > td {
+  background: rgba(34, 197, 94, 0.15) !important;
+  font-weight: 600;
+}

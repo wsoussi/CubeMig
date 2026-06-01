@@ -2,22 +2,134 @@
     <div class="col-12 md:col-6 gap-2">
         <div class="card">
             <h5>Attack simulation</h5>
-            <p>Choose the target app and the attack type</p>
-            <p>Currently only spring application with CVE-2022-22963 is available</p>  
+            <p>Pick the cluster where the vulnerable app runs, choose the target app and an attack type. The attack is executed against the running pod — Falco then detects it and decides (based on the active rules) whether to migrate or just log the event.</p>
+
             <div class="p-formgrid grid">
-                <div class="field col">
-                    <p-dropdown [options]="targetPod" [(ngModel)]="selectedApp" placeholder="Select the target application" [style]="{'width': '100%'}"></p-dropdown>
-                </div>
-                <div class="field col">
-                    <p-dropdown [options]="attackType" [(ngModel)]="selectedAttack" placeholder="Select the attack type" [style]="{'width': '100%'}"></p-dropdown>    
+                <div class="field col-12">
+                    <label class="block mb-2">Source cluster</label>
+                    <p-dropdown
+                        [options]="attackClusterSelection"
+                        [(ngModel)]="selectedAttackCluster"
+                        (onChange)="onAttackClusterChange()"
+                        placeholder="Select the cluster running the target app"
+                        [style]="{'width': '100%'}">
+                    </p-dropdown>
                 </div>
             </div>
 
+            <div class="p-formgrid grid">
+                <div class="field col">
+                    <p-dropdown
+                        [options]="targetPod"
+                        [(ngModel)]="selectedApp"
+                        [placeholder]="podsLoading ? 'Loading vulnerable apps…' : (targetPod.length ? 'Select the target application' : 'No vuln-spring or vuln-redis app found on cluster')"
+                        [disabled]="!selectedAttackCluster || podsLoading"
+                        [style]="{'width': '100%'}">
+                    </p-dropdown>
+                </div>
+                <div class="field col">
+                    <p-dropdown [options]="attackType" [(ngModel)]="selectedAttack" placeholder="Select the attack type" [style]="{'width': '100%'}"></p-dropdown>
+                </div>
+            </div>
+
+            @if(expectedFalcoRule) {
+                <div class="expected-rule-hint mb-3">
+                    <i class="pi pi-shield mr-2"></i>
+                    <span>This attack will trigger Falco rule:</span>
+                    <code class="ml-2">{{ expectedFalcoRule }}</code>
+                </div>
+            }
+
             <div class="flex flex-wrap gap-2" style="display: flex; justify-content: flex-end;">
                 <button pButton label="Reset" (click)="reset()" class="p-button-outlined p-button-secondary"></button>
-                <button pButton label="Attack" (click)="simulateAttack()" [loading]="loading"></button>
+                <button pButton label="Attack" (click)="simulateAttack()" [loading]="loading" [disabled]="!selectedAttackCluster || !selectedApp || !selectedAttack || loading"></button>
+            </div>
+
+            @if(lastTriggeredFalcoRule) {
+                <div class="last-attack mt-3">
+                    <div class="last-attack-header">
+                        <i class="pi pi-bolt mr-2"></i>
+                        <strong>Last attack triggered</strong>
+                        @if(lastTriggeredAt) {
+                            <small class="text-color-secondary ml-2">{{ lastTriggeredAt | date:'mediumTime' }}</small>
+                        }
+                    </div>
+                    <div class="last-attack-body">
+                        <div><span class="label">Expected Falco rule:</span> <code>{{ lastTriggeredFalcoRule }}</code></div>
+                        @if(lastTriggeredTargetUrl) {
+                            <div><span class="label">Target URL:</span> <code>{{ lastTriggeredTargetUrl }}</code></div>
+                        }
+                        @if(lastTriggeredCluster) {
+                            <div><span class="label">Cluster:</span> <code>{{ lastTriggeredCluster }}</code></div>
+                        }
+                        @if(lastTriggeredPodName) {
+                            <div><span class="label">Pod:</span> <code>{{ lastTriggeredPodName }}</code></div>
+                        }
+                        @if(lastTriggeredDetail) {
+                            <p class="text-color-secondary mt-2">{{ lastTriggeredDetail }}</p>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+
+        <div class="card mt-3">
+            <h5>vuln-spring scale control</h5>
+            <p>Select a cluster and scale `vuln-spring` like in Migration tab controls.</p>
+            <p class="text-color-secondary text-sm mb-2">
+                Only works where a Kubernetes <code>Deployment</code> named <code>vuln-spring</code> exists (namespaces <code>istio-enabled</code> or <code>default</code>).
+                Typical source cluster (e.g. cluster1) has that deployment; PNet, SEV-SNP or cluster2 often only have migrated <code>vuln-spring-restore-*</code> pods — those cannot be scaled with this control.
+            </p>
+            <div class="p-formgrid grid">
+                <div class="field col-12">
+                    <p-dropdown [options]="clusterSelection" [(ngModel)]="selectedScaleCluster" placeholder="Select cluster" [style]="{'width': '100%'}"></p-dropdown>
+                </div>
+            </div>
+            <div class="flex flex-wrap gap-2" style="display: flex; justify-content: flex-end;">
+                <button pButton label="Scale to 1" class="p-button-outlined p-button-help" (click)="scaleVulnSpring(1)" [loading]="scaleLoading" [disabled]="!selectedScaleCluster || scaleLoading"></button>
+                <button pButton label="Scale to 0" class="p-button-outlined p-button-danger" (click)="scaleVulnSpring(0)" [loading]="scaleLoading" [disabled]="!selectedScaleCluster || scaleLoading"></button>
             </div>
         </div>
     </div>
+
+    <div class="col-12 md:col-6 gap-2">
+        <div class="card">
+            <div class="mb-3" style="display: flex; align-items: center; justify-content: space-between;">
+                <h5 style="margin: 0;">Active Falco rules</h5>
+                <button pButton label="Reload" icon="pi pi-refresh" class="p-button-outlined" (click)="loadConfigRules()" [loading]="rulesLoading"></button>
+            </div>
+            <p>These are the rules configured in <code>config.json</code>. When Falco raises an alert for one of these rule names on a matching source cluster, the configured action (migrate / log) is performed.</p>
+            @if(expectedFalcoRule) {
+                <p class="text-color-secondary mb-2">
+                    <i class="pi pi-info-circle mr-1"></i>
+                    The selected attack maps to Falco rule <code>{{ expectedFalcoRule }}</code>@if(selectedAttackCluster) { on cluster <code>{{ selectedAttackCluster }}</code> }. Highlighted rows below will react when Falco reports it.
+                </p>
+            }
+            <p-table [value]="configRules" [loading]="rulesLoading">
+                <ng-template pTemplate="header">
+                    <tr>
+                        <th>Falco rule</th>
+                        <th>Source cluster</th>
+                        <th>Action</th>
+                        <th>Target cluster</th>
+                    </tr>
+                </ng-template>
+                <ng-template pTemplate="body" let-rule>
+                    <tr [ngClass]="isRuleMatchingSelectedAttack(rule) ? 'rule-match-row' : ''">
+                        <td>{{ rule.rule }}</td>
+                        <td>{{ rule.cluster }}</td>
+                        <td>{{ rule.action }}</td>
+                        <td>{{ rule.targetCluster || '—' }}</td>
+                    </tr>
+                </ng-template>
+                <ng-template pTemplate="emptymessage">
+                    <tr>
+                        <td colspan="4" class="text-color-secondary">No rules configured in config.json. Manage them on the Configuration page.</td>
+                    </tr>
+                </ng-template>
+            </p-table>
+        </div>
+    </div>
+
     <p-toast key="tst"></p-toast>
 </div>

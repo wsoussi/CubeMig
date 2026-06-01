@@ -11,11 +11,14 @@ import { ConfigComponent } from './pages/config/config.component';
 import { LogsComponent } from './pages/logs/logs.component';
 import { SimulationComponent } from './pages/simulation/simulation.component';
 import { TeeEncapsulationComponent } from './pages/tee-encapsulation/tee-encapsulation.component';
+import { EvaluationComponent } from './pages/evaluation/evaluation.component';
+import { MigrationPipelineMonitorComponent } from './shared/migration-pipeline-monitor/migration-pipeline-monitor.component';
 import { CommonModule } from '@angular/common';
 import { TableModule } from 'primeng/table';
 import { ButtonModule } from 'primeng/button';
 import { InputTextModule } from 'primeng/inputtext';
 import { DropdownModule } from 'primeng/dropdown';
+import { MultiSelectModule } from 'primeng/multiselect';
 import { ToggleButtonModule } from 'primeng/togglebutton';
 import { InputSwitchModule } from 'primeng/inputswitch';
 import { TreeModule } from 'primeng/tree';
@@ -26,6 +29,7 @@ import { ToastModule } from 'primeng/toast';
 import { ProgressSpinnerModule } from 'primeng/progressspinner';
 import { MessagesModule } from 'primeng/messages';
 import { MessageModule } from 'primeng/message';
+import { TooltipModule } from 'primeng/tooltip';
 import { FormsModule } from '@angular/forms';
 import { MessageService } from 'primeng/api';
 import { MarkdownModule } from 'ngx-markdown';
@@ -38,7 +42,9 @@ import { MarkdownModule } from 'ngx-markdown';
     ConfigComponent,
     LogsComponent,
     SimulationComponent,
-    TeeEncapsulationComponent
+    TeeEncapsulationComponent,
+    EvaluationComponent,
+    MigrationPipelineMonitorComponent
   ],
   imports: [
     CommonModule,
@@ -49,6 +55,7 @@ import { MarkdownModule } from 'ngx-markdown';
     TableModule, 
     ButtonModule,
     DropdownModule,
+    MultiSelectModule,
     InputTextModule,
     ToggleButtonModule,
     InputSwitchModule,
@@ -60,6 +67,7 @@ import { MarkdownModule } from 'ngx-markdown';
     ProgressSpinnerModule,
     MessagesModule,
     MessageModule,
+    TooltipModule,
     // Markdown module for rendering markdown content
     MarkdownModule.forRoot()
   ],

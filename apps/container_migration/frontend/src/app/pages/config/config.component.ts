@@ -3,6 +3,7 @@ import { ConfigService } from '../../service/config.service';
 import { catchError, filter, map, of, take, tap } from 'rxjs';
 import { RuleConfig } from '../../model/config.model';
 import { SelectItem } from 'primeng/api';
+import { K8sService } from '../../service/k8s.service';
 
 @Component({
   selector: 'app-config',
@@ -21,27 +22,54 @@ export class ConfigComponent implements OnInit {
   public selectedCluster: string = '';
   public selectedAction: string = '';
   public selectedTargetCluster: string = '';
+  public selectedIstioRoutingContext: string = 'cluster1';
   public isGeneratingFA: boolean = false;
   public isGeneratingAISuggestion: boolean = false;
 
-  constructor(private configService: ConfigService) { }
+  constructor(private configService: ConfigService, private k8sService: K8sService) { }
 
   ngOnInit(): void {
     this.getConfig();
-
-    this.clusterSelection = [
-      { label: 'Cluster 1', value: 'cluster1' }
-    ];
 
     this.actionSelection = [
       { label: 'Migrate container', value: 'migrate' },
       { label: 'Log falco events', value: 'log' },
     ];
+    this.loadClusters();
 
-    this.targetClusterSelection = [
-      { label: 'Cluster 2', value: 'cluster2' }
-    ];
+  }
 
+  private loadClusters(): void {
+    this.k8sService.getClusters().pipe(
+      take(1),
+      catchError(() => of({ clusters: [] as string[] }))
+    ).subscribe((response) => {
+      this.clusterSelection = (response.clusters || []).map((cluster) => ({
+        label: cluster,
+        value: cluster
+      } as SelectItem));
+      this.selectedIstioRoutingContext = this.getDefaultIstioRoutingContext();
+      this.updateTargetClusterSelection();
+    });
+  }
+
+  public onSourceClusterChange(): void {
+    this.updateTargetClusterSelection();
+    if (this.selectedCluster === this.selectedTargetCluster) {
+      this.selectedTargetCluster = '';
+    }
+  }
+
+  private updateTargetClusterSelection(): void {
+    this.targetClusterSelection = this.clusterSelection.filter(cluster => cluster.value !== this.selectedCluster);
+  }
+
+  private getDefaultIstioRoutingContext(): string {
+    const cluster1 = this.clusterSelection.find((cluster) => String(cluster.value) === 'cluster1');
+    if (cluster1) {
+      return String(cluster1.value);
+    }
+    return this.clusterSelection.length > 0 ? String(this.clusterSelection[0].value) : 'cluster1';
   }
 
   private getConfig() {
@@ -84,12 +112,19 @@ export class ConfigComponent implements OnInit {
 
   public saveNewRule(): void {
     this.isDialogVisible = false;
+    if (this.selectedAction === 'migrate' && this.selectedCluster === this.selectedTargetCluster) {
+      this.resetDialog();
+      return;
+    }
 
     const ruleConfig: RuleConfig = {
       rule: this.selectedRule,
       cluster: this.selectedCluster,
       action: this.selectedAction,
       targetCluster: this.selectedTargetCluster,
+      istio_routing_context: this.selectedAction === 'migrate'
+        ? (this.selectedIstioRoutingContext || this.getDefaultIstioRoutingContext())
+        : 'cluster1',
       forensic_analysis: this.isGeneratingFA,
       AI_suggestion: this.isGeneratingAISuggestion
     };
@@ -111,6 +146,7 @@ export class ConfigComponent implements OnInit {
     this.selectedCluster = '';
     this.selectedAction = '';
     this.selectedTargetCluster = '';
+    this.selectedIstioRoutingContext = this.getDefaultIstioRoutingContext();
     this.isGeneratingFA = false;
     this.isGeneratingAISuggestion = false;
   }

@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: setup-criu-cpu-cap
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: setup-criu-cpu-cap
+  template:
+    metadata:
+      labels:
+        app: setup-criu-cpu-cap
+    spec:
+      hostPID: true
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: setup
+          image: alpine:3.20
+          securityContext:
+            privileged: true
+          env:
+            - name: CPU_CAP_MODE
+              value: "__CPU_CAP_MODE__"
+            - name: CPU_CAP_ENABLED
+              value: "__CPU_CAP_ENABLED__"
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              CRIU_DIR="/host/etc/criu"
+              CONF_FILE="${CRIU_DIR}/runc.conf"
+              TMP_FILE="/tmp/runc.conf"
+
+              mkdir -p "${CRIU_DIR}"
+              touch "${CONF_FILE}"
+
+              cp "${CONF_FILE}" "${TMP_FILE}"
+
+              # Keep runc.conf idempotent:
+              # - remove every existing cpu-cap line
+              # - remove stale legacy CubeMig marker comments (older script versions appended these repeatedly)
+              # - add a single cpu-cap line only when explicitly enabled
+              awk '!/^[[:space:]]*cpu-cap([[:space:]]|=)/ && !/^[[:space:]]*# Added by CubeMig for CRIU CPU capability validation[[:space:]]*$/' "${TMP_FILE}" > "${TMP_FILE}.new"
+              mv "${TMP_FILE}.new" "${TMP_FILE}"
+
+              if [ "${CPU_CAP_ENABLED}" = "true" ]; then
+                printf 'cpu-cap %s\n' "${CPU_CAP_MODE}" >> "${TMP_FILE}"
+              fi
+
+              if ! cmp -s "${TMP_FILE}" "${CONF_FILE}"; then
+                cp "${TMP_FILE}" "${CONF_FILE}"
+                if [ "${CPU_CAP_ENABLED}" = "true" ]; then
+                  echo "Updated ${CONF_FILE} with cpu-cap ${CPU_CAP_MODE}"
+                else
+                  echo "Updated ${CONF_FILE}; removed cpu-cap entries"
+                fi
+              else
+                if [ "${CPU_CAP_ENABLED}" = "true" ]; then
+                  echo "No changes needed in ${CONF_FILE} (cpu-cap ${CPU_CAP_MODE} already present)"
+                else
+                  echo "No changes needed in ${CONF_FILE} (no cpu-cap entries present)"
+                fi
+              fi
+
+              sleep 3600
+          volumeMounts:
+            - name: host-etc
+              mountPath: /host/etc
+      volumes:
+        - name: host-etc
+          hostPath:
+            path: /etc

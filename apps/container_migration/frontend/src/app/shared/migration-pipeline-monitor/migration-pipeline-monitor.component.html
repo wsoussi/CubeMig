@@ -1,0 +1,69 @@
+<div class="migration-monitor-inner">
+    <div class="monitor-header">
+        <h5>{{ title }}</h5>
+        @if (statusLabel) {
+            <span class="status-badge" [ngClass]="statusBadgeClass">{{ statusLabel }}</span>
+        }
+    </div>
+
+    @if (showSpinner) {
+        <div class="monitor-row">
+            <p-progressSpinner styleClass="w-2rem h-2rem" strokeWidth="6"></p-progressSpinner>
+            <span>Migration is running…</span>
+        </div>
+    }
+
+    <div class="status-detail">
+        {{ statusDetail || 'No migration started yet.' }}
+    </div>
+
+    @if (statusUpdatedAt) {
+        <small class="text-color-secondary">Last update: {{ statusUpdatedAt | date:'mediumTime' }}</small>
+    }
+    @if (statusTargetNode && statusTargetNode !== 'unknown') {
+        <div><small class="text-color-secondary">Target node: {{ statusTargetNode }}</small></div>
+    }
+
+    @if (downtimeMs != null) {
+        <div class="downtime-summary">
+            <span class="downtime-label">Downtime</span>
+            <span class="downtime-value" [pTooltip]="'From the source workload reporting scaled down after checkpoint until the restore pod reports Running. Client-observed HTTP downtime is measured separately by the evaluation probe.'" tooltipPosition="top">{{ formatDuration(downtimeMs) }}</span>
+        </div>
+    }
+
+    <div class="step-list">
+        <div class="step-list-header">
+            <span>Pipeline stage</span>
+            <span class="step-h-duration">Duration</span>
+            <span class="step-h-status">Status</span>
+        </div>
+        @for (stage of stageStatuses; track stage.key; let i = $index) {
+            <div class="step-item" [ngClass]="'stage-' + stage.status">
+                <span class="step-number">{{ i + 1 }}.</span>
+                <span class="step-label">{{ stage.label }}</span>
+                <span class="step-duration">{{ formatStageTiming(stage, timerUiTick) }}</span>
+                <span class="step-status">{{ stage.status }}</span>
+            </div>
+        }
+    </div>
+    @if (statusLogPath) {
+        <small class="text-color-secondary">Log path: {{ statusLogPath }}</small>
+    }
+
+    <div class="log-output mt-3">
+        <div class="log-title">Live migration logs</div>
+        @if (liveLogLines.length > 0) {
+            <pre>{{ liveLogLines.join('\n') }}</pre>
+        } @else {
+            <pre>No migration logs yet.</pre>
+        }
+    </div>
+    <div class="log-output mt-3">
+        <div class="log-title">Latest Kubernetes events (target pod)</div>
+        @if (statusK8sEvents.length > 0) {
+            <pre>{{ statusK8sEvents.join('\n') }}</pre>
+        } @else {
+            <pre>No Kubernetes events captured yet.</pre>
+        }
+    </div>
+</div>

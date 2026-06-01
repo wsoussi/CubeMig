@@ -29,8 +29,8 @@ if ATTACK_NAME not in VALID:
     sys.exit(2)
 
 # ------------------ HARDCODED TEST CONFIG ------------------
-PY_PROJECT_PATH = "/home/ubuntu/meierm78/ContMigration-VT1/apps/kubernetes/vuln-spring/"
-TARGET_URL = "http://10.0.0.29:30080"
+PY_PROJECT_PATH = "/home/ubuntu/ContMigration-VT1/apps/kubernetes/vuln-spring/"
+TARGET_URL = "http://10.0.0.29:30081"
 ATTACKER_IP = "10.0.0.180"
 ATTACKER_PORT = "4444"
 

@@ -13,6 +13,7 @@
                         <th>Cluster</th>
                         <th>Action</th>
                         <th>Target</th>
+                        <th>Istio routing</th>
                         <th>Forensic analysis</th>
                         <th>AI suggestion</th>
                         <th style="width: 4rem"></th>
@@ -31,6 +32,9 @@
                         </td>
                         <td style="min-width: 200px;">
                             {{config.action === 'migrate' ? config.targetCluster : 'N/A'}}
+                        </td>
+                        <td style="min-width: 200px;">
+                            {{config.action === 'migrate' ? (config.istio_routing_context || 'cluster1') : 'N/A'}}
                         </td>
                         <td style="min-width: 200px;">
                             <span [class]="'config-badge config-' + config.forensic_analysis">{{ config.forensic_analysis ? 'Enabled' : 'Disabled'}}</span>
@@ -53,11 +57,14 @@
                     <p-dropdown [options]="actionSelection" [(ngModel)]="selectedAction" placeholder="Select action" [style]="{'width': '100%'}"></p-dropdown>
                 </div>
                 <div class="field">
-                    <p-dropdown [options]="clusterSelection" [(ngModel)]="selectedCluster" placeholder="Select a cluster" [style]="{'width': '100%'}"></p-dropdown>
+                    <p-dropdown [options]="clusterSelection" [(ngModel)]="selectedCluster" (onChange)="onSourceClusterChange()" placeholder="Select a cluster" [style]="{'width': '100%'}"></p-dropdown>
                 </div>
 
                 @if(isMigrateActionSelected()) {
                     <p-dropdown [options]="targetClusterSelection" [(ngModel)]="selectedTargetCluster" placeholder="Select target cluster" [style]="{'width': '100%'}"></p-dropdown>
+                    <div class="field mt-3">
+                        <p-dropdown [options]="clusterSelection" [(ngModel)]="selectedIstioRoutingContext" placeholder="Istio routing context" [style]="{'width': '100%'}"></p-dropdown>
+                    </div>
 
                     <div class="grid formgrid mb-3 mt-5">
                         <p-inputSwitch [(ngModel)]="isGeneratingFA" class="mr-5 ml-3"></p-inputSwitch>

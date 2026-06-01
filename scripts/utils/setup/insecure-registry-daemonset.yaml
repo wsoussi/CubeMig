@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: setup-insecure-registry
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: setup-insecure-registry
+  template:
+    metadata:
+      labels:
+        app: setup-insecure-registry
+    spec:
+      hostPID: true
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: setup
+          image: alpine:3.20
+          securityContext:
+            privileged: true
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - |
+              set -eu
+              REGISTRY="${REGISTRY:-160.85.255.146:5000}"
+              PNET_PREFLIGHT_REGISTRY="${PNET_PREFLIGHT_REGISTRY:-10.0.0.1:5000}"
+              PNET_WIREGUARD_MIGRATION_REGISTRY="${PNET_WIREGUARD_MIGRATION_REGISTRY:-10.10.10.1:5000}"
+              CONF_DIR="/host/etc/containers/registries.conf.d"
+              CONF_FILE="${CONF_DIR}/99-cubemig-insecure.conf"
+
+              mkdir -p "${CONF_DIR}"
+
+              if [ ! -f "${CONF_FILE}" ]; then
+                touch "${CONF_FILE}"
+              fi
+
+              changed=0
+              ensure_registry_entry() {
+                local registry="$1"
+                if ! grep -qxF "location = \"${registry}\"" "${CONF_FILE}"; then
+                  cat <<EOF >> "${CONF_FILE}"
+              [[registry]]
+              location = "${registry}"
+              insecure = true
+
+              EOF
+                  changed=1
+                fi
+              }
+
+              # Append-only and idempotent: keep existing entries, add only missing ones.
+              ensure_registry_entry "${REGISTRY}"
+              ensure_registry_entry "${PNET_PREFLIGHT_REGISTRY}"
+              ensure_registry_entry "${PNET_WIREGUARD_MIGRATION_REGISTRY}"
+
+              if [ "${changed}" -eq 1 ]; then
+                nsenter -t 1 -m -u -i -n -p -- systemctl restart crio || true
+              fi
+
+              # Keep the pod running temporarily for log inspection.
+              sleep 3600
+          env:
+            - name: REGISTRY
+              value: "160.85.255.146:5000"
+            - name: PNET_PREFLIGHT_REGISTRY
+              value: "10.0.0.1:5000"
+            - name: PNET_WIREGUARD_MIGRATION_REGISTRY
+              value: "10.10.10.1:5000"
+          volumeMounts:
+            - name: host-etc
+              mountPath: /host/etc
+      volumes:
+        - name: host-etc
+          hostPath:
+            path: /etc

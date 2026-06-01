@@ -1,10 +1,9 @@
 import { HttpClient } from '@angular/common/http';
 import { Injectable } from '@angular/core';
-import { map, Observable } from 'rxjs';
+import { Observable } from 'rxjs';
 import { PodsResponse } from '../model/k8s.model';
 import { MigrationRequest } from '../model/migration-request.model';
 import { MigrationHistoryApiResponse, MigrationStatusResponse } from '../model/migration-status.model';
-import { TreeNode } from 'primeng/api';
 
 @Injectable({
   providedIn: 'root'
@@ -14,6 +13,11 @@ export class K8sService {
   private apiUrl = 'http://160.85.255.146:8000'; // Change this to your FastAPI server URL
 
   constructor(private http: HttpClient) {}
+
+  getClusters(): Observable<{ clusters: string[] }> {
+    const url = `${this.apiUrl}/k8s/clusters`;
+    return this.http.get<{ clusters: string[] }>(url);
+  }
 
   /**
    * Get a list of pods and their statuses from the specified cluster.
@@ -49,6 +53,93 @@ export class K8sService {
   getMigrationHistory(limit = 10, offset = 0): Observable<MigrationHistoryApiResponse> {
     const url = `${this.apiUrl}/migration-history?limit=${limit}&offset=${offset}`;
     return this.http.get<MigrationHistoryApiResponse>(url);
+  }
+
+  getRoutingDemoTrafficSubset(cluster: string): Observable<{ cluster: string; subset: string }> {
+    const url = `${this.apiUrl}/k8s/routing-demo/traffic-subset/${encodeURIComponent(cluster)}`;
+    return this.http.get<{ cluster: string; subset: string }>(url);
+  }
+
+  toggleRoutingDemoTraffic(cluster: string): Observable<{
+    cluster: string;
+    previous_subset: string;
+    subset: string;
+    message: string;
+  }> {
+    const url = `${this.apiUrl}/k8s/routing-demo/toggle-traffic`;
+    return this.http.post<{ cluster: string; previous_subset: string; subset: string; message: string }>(url, {
+      cluster
+    });
+  }
+
+  clearRoutingDemoFault(cluster: string): Observable<{
+    cluster: string;
+    removed: boolean;
+    message: string;
+  }> {
+    const url = `${this.apiUrl}/k8s/routing-demo/clear-fault`;
+    return this.http.post<{ cluster: string; removed: boolean; message: string }>(url, { cluster });
+  }
+
+  scaleRoutingDemo(cluster: string, replicas = 1): Observable<{
+    cluster: string;
+    deployment: string;
+    namespace: string;
+    replicas: number;
+    message: string;
+  }> {
+    const url = `${this.apiUrl}/k8s/routing-demo/scale`;
+    return this.http.post<{ cluster: string; deployment: string; namespace: string; replicas: number; message: string }>(url, {
+      cluster,
+      replicas
+    });
+  }
+
+  scaleVulnSpring(cluster: string, replicas = 1): Observable<{
+    cluster: string;
+    deployment: string;
+    namespace: string;
+    replicas: number;
+    message: string;
+  }> {
+    const url = `${this.apiUrl}/k8s/vuln-spring/scale`;
+    return this.http.post<{ cluster: string; deployment: string; namespace: string; replicas: number; message: string }>(url, {
+      cluster,
+      replicas
+    });
+  }
+
+  runHttpProbe(url: string, connectTimeoutS = 2, maxTimeS = 10): Observable<{
+    timestamp: string;
+    url: string;
+    http_code: number;
+    total_s: number;
+    total_ms: number;
+    ok: boolean;
+    stdout: string;
+    stdout_json?: Record<string, unknown> | null;
+    counter?: number | null;
+    stderr: string;
+    exit_code: number;
+  }> {
+    const endpoint = `${this.apiUrl}/k8s/http-probe`;
+    return this.http.post<{
+      timestamp: string;
+      url: string;
+      http_code: number;
+      total_s: number;
+      total_ms: number;
+      ok: boolean;
+      stdout: string;
+      stdout_json?: Record<string, unknown> | null;
+      counter?: number | null;
+      stderr: string;
+      exit_code: number;
+    }>(endpoint, {
+      url,
+      connect_timeout_s: connectTimeoutS,
+      max_time_s: maxTimeS
+    });
   }
 
 }
