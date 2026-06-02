@@ -101,18 +101,21 @@ For real migrations:
    cd CubeMig
    ```
 
-2. **Start the backend**
+2. **Start the registry**
+   ```bash
+   docker start registry
+   ```
+
+3. **Start the backend**
    ```bash
    cd apps/container_migration/backend
-   python3 -m venv .venv
-   source .venv/bin/activate
    pip install -r requirements.txt
    python3 main.py
    ```
 
    Backend will be available at `http://localhost:8000`.
 
-3. **Start the frontend**
+4. **Start the frontend**
    ```bash
    cd apps/container_migration/frontend
    npm install
@@ -121,26 +124,33 @@ For real migrations:
 
    Frontend will be available at `http://localhost:4200`.
 
-4. **Open the API documentation**
+5. **Open the API documentation**
    ```text
    http://localhost:8000/docs
    ```
 
 ## 📸 Screenshots
 
-Screenshots are helpful for an open-source README, but they should focus on **how to use the demo**, not on setup commands.
+Screenshots are helpful for an open-source README; they should demonstrate **how to use the demo**, not setup commands. All demo screenshots are included in `docs/assets/screenshots/`.
 
-Recommended screenshots:
 
-| Screenshot | What to show |
+Preview (compact table; click thumbnails for full-size):
+
+| Screenshot | Description |
 | --- | --- |
-| `docs/assets/screenshots/overview.png` | Overview page with clusters or pods loaded |
-| `docs/assets/screenshots/migration-form.png` | Manual migration form before starting a run |
-| `docs/assets/screenshots/migration-running.png` | Migration pipeline while it is running |
-| `docs/assets/screenshots/logs.png` | Logs page with a migration log selected |
-| `docs/assets/screenshots/evaluation.png` | Evaluation run details or HTTP probe results |
+| <a href="docs/assets/screenshots/overview.png"><img src="docs/assets/screenshots/overview.png" width="150"/></a> | **Overview:** clusters and pods list loaded in the UI. |
+| <a href="docs/assets/screenshots/migrationform.png"><img src="docs/assets/screenshots/migrationform.png" width="150"/></a> | **Migration form:** manual migration form before starting a run. |
+| <a href="docs/assets/screenshots/migrations-pipeline.png"><img src="docs/assets/screenshots/migrations-pipeline.png" width="150"/></a> | **Migration pipeline:** pipeline status while a migration is executing. |
+| <a href="docs/assets/screenshots/simulation.png"><img src="docs/assets/screenshots/simulation.png" width="150"/></a> | **Simulation:** attack simulation / alert generation view. |
+| <a href="docs/assets/screenshots/evaluation.png"><img src="docs/assets/screenshots/evaluation.png" width="150"/></a> | **Evaluation:** evaluation run details or HTTP probe results. |
 
-Use sanitized demo data. Do not include real public IPs, tokens, private hostnames, kubeconfigs, or sensitive logs.
+Guidelines for screenshots:
+
+- Use sanitized demo data — remove real IPs, tokens, kubeconfigs, and private hostnames.
+- Crop or blur any sensitive-looking fields (kubeconfigs, auth tokens, hostnames).
+- Prefer clear UI states that illustrate the flow (selection → start → running → logs → evaluation).
+
+If you want different sizes, ordering, or captions, tell me which images to change.
 
 ## 🎬 Guided Demo
 
@@ -286,13 +296,49 @@ The wrapper can collect:
 
 ## 🔧 Migration Process
 
-1. **Checkpoint Creation**: CRIU creates a checkpoint of the running container
-2. **Image Building**: The checkpoint is packaged into a checkpoint image
-3. **Registry Push**: The image is pushed to the configured registry
-4. **Destination Restore**: The destination cluster pulls and restores the pod
-5. **Routing Update**: Istio routing is checked or adjusted for demo workloads
-6. **Validation**: Logs, pod state, and application responses are checked
-7. **Cleanup**: Temporary resources and old pod state are cleaned up where configured
+The migration follows this **cold stateful migration** pattern with **8 phases**:
+
+### Phase 1: Destination Preparation
+- **Preflight Checks** (optional): Verify Kubernetes versions, node readiness, API health
+- **Destination Setup**: Deploy insecure-registry and CRIU daemonsets
+- **Base Image Pre-Pull**: Pre-pull the source pod's base image on destination (optional)
+- **Routing Setup**: Deploy Service and DestinationRule for routing-demo (if applicable)
+
+### Phase 2: Source Checkpoint
+- **Source Preparation**: Configure CRIU, optionally clean incompatible mounts, inject HTTP 503 on routing
+- **Checkpoint via API**: Call kubelet checkpoint endpoint; source pod **continues running**
+- **Wait for Checkpoint File**: Poll NFS for checkpoint `.tar` to appear (default timeout: 180s)
+- **Scale Source to 0**: Only after `.tar` is visible on NFS, scale source deployment to 0 replicas
+  - **Critical**: Scaling before checkpoint completion prevents NFS sync
+  - Source pod is now shut down
+
+### Phase 3: Source Pod Shutdown
+- Source Deployment/StatefulSet is scaled to 0 replicas after checkpoint file is visible
+- Original pod is terminated; no further requests are served
+
+### Phase 4: Checkpoint Processing
+- **Fix Permissions**: Set readable/writable permissions on checkpoint `.tar`
+- **CPU Compatibility Check** (optional): Validate target CPU against checkpoint CPU requirements
+- **Mount Normalization** (optional): Remove incompatible mounts from checkpoint
+
+### Phase 5: Image & Registry
+- **Build Checkpoint Image**: Use buildah/podman to create OCI image from checkpoint `.tar`
+- **Push to Registry**: Push checkpoint image to configured registry
+
+### Phase 6: Checkpoint Image on Destination
+- **Switch to Destination Context**: kubectl use-context
+- **Pre-Pull Checkpoint Image** (optional): Daemonset pre-pulls checkpoint image on destination nodes
+
+### Phase 7: Pod Restoration
+- **Generate Restore YAML**: Create pod spec with checkpoint image, optionally disable Istio sidecar
+- **Deploy Restore Pod**: kubectl apply restore pod; CRI-O triggers CRIU restore automatically via annotations
+- **Wait for Pod Ready**: Poll pod status (timeout: 300s); fail-fast on `CreateContainerError`, `ErrImagePull`, etc.
+
+### Phase 8: Traffic Switching & Cleanup
+- **Switch Traffic** (if Istio): Update VirtualService to route to v2 (destination pod)
+- **Cleanup Old Checkpoints**: Keep only last 5 checkpoints per app
+- **Log Performance**: Document CRIU timing (freeze, memdump, memwrite), migration duration
+- **Optional Analysis**: Run forensic analysis and/or AI security suggestions
 
 ## 🧪 Demo Applications
 
