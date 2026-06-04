@@ -131,10 +131,7 @@ For real migrations:
 
 ## 📸 Screenshots
 
-Screenshots are helpful for an open-source README; they should demonstrate **how to use the demo**, not setup commands. All demo screenshots are included in `docs/assets/screenshots/`.
-
-
-Preview (compact table; click thumbnails for full-size):
+Screenshots of the individual parts of the application. Click a thumbnail for the full-size image.
 
 | Screenshot | Description |
 | --- | --- |
@@ -143,14 +140,6 @@ Preview (compact table; click thumbnails for full-size):
 | <a href="docs/assets/screenshots/migrations-pipeline.png"><img src="docs/assets/screenshots/migrations-pipeline.png" width="150"/></a> | **Migration pipeline:** pipeline status while a migration is executing. |
 | <a href="docs/assets/screenshots/simulation.png"><img src="docs/assets/screenshots/simulation.png" width="150"/></a> | **Simulation:** attack simulation / alert generation view. |
 | <a href="docs/assets/screenshots/evaluation.png"><img src="docs/assets/screenshots/evaluation.png" width="150"/></a> | **Evaluation:** evaluation run details or HTTP probe results. |
-
-Guidelines for screenshots:
-
-- Use sanitized demo data — remove real IPs, tokens, kubeconfigs, and private hostnames.
-- Crop or blur any sensitive-looking fields (kubeconfigs, auth tokens, hostnames).
-- Prefer clear UI states that illustrate the flow (selection → start → running → logs → evaluation).
-
-If you want different sizes, ordering, or captions, tell me which images to change.
 
 ## 🎬 Guided Demo
 
